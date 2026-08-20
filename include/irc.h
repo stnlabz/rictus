@@ -6,6 +6,7 @@
 #include "config.h"
 #include "tls_win.h"
 
+
 typedef struct
 {
     int sasl_requested;
@@ -17,6 +18,34 @@ typedef struct
     int joined;
 
 } rictus_irc_state;
+
+
+/*
+ * ------------------------------------------------
+ * PRIVATE COMMAND CALLBACK
+ * ------------------------------------------------
+ *
+ * IRC owns transport parsing.
+ *
+ * Core owns command processing.
+ *
+ * A private IRC PRIVMSG addressed directly to
+ * Rictus may be handed to Core through this
+ * callback.
+ */
+
+typedef int
+(*rictus_irc_command_callback_fn)(
+    const char *sender,
+    const char *text,
+    void *context
+);
+
+
+void irc_set_command_callback(
+    rictus_irc_command_callback_fn callback,
+    void *context
+);
 
 
 int irc_send(
@@ -33,5 +62,6 @@ int irc_handle_line(
     rictus_irc_state *state,
     const char *line
 );
+
 
 #endif

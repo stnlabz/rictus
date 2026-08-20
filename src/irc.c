@@ -12,7 +12,348 @@
 #include "sasl.h"
 #include "irc.h"
 
+
 #define IRC_BUFFER_SIZE 8192
+
+
+/*
+ * ------------------------------------------------
+ * COMMAND CALLBACK
+ * ------------------------------------------------
+ */
+
+static rictus_irc_command_callback_fn
+g_command_callback =
+    NULL;
+
+
+static void *
+g_command_callback_context =
+    NULL;
+
+
+void irc_set_command_callback(
+    rictus_irc_command_callback_fn callback,
+    void *context
+)
+{
+    g_command_callback =
+        callback;
+
+    g_command_callback_context =
+        context;
+}
+
+
+/*
+ * ------------------------------------------------
+ * PRIVATE PRIVMSG
+ * ------------------------------------------------
+ */
+
+static int parse_private_privmsg(
+    const char *line,
+    const rictus_config *config
+)
+{
+    char copy[
+        IRC_BUFFER_SIZE
+    ];
+
+    char sender[
+        256
+    ];
+
+    char *context =
+        NULL;
+
+    char *prefix;
+    char *command;
+    char *target;
+    char *text;
+
+    char *bang;
+
+    size_t sender_length;
+
+
+    if (
+        line == NULL ||
+        config == NULL
+    )
+    {
+        return 0;
+    }
+
+
+    if (
+        strlen(line) >=
+        sizeof(copy)
+    )
+    {
+        return 0;
+    }
+
+
+    /*
+     * IRC user messages use a source prefix:
+     *
+     * :nick!user@host PRIVMSG target :message
+     */
+
+    if (
+        line[0] != ':'
+    )
+    {
+        return 0;
+    }
+
+
+    strcpy_s(
+        copy,
+        sizeof(copy),
+        line
+    );
+
+
+    prefix =
+        strtok_s(
+            copy,
+            " ",
+            &context
+        );
+
+
+    command =
+        strtok_s(
+            NULL,
+            " ",
+            &context
+        );
+
+
+    target =
+        strtok_s(
+            NULL,
+            " ",
+            &context
+        );
+
+
+    if (
+        prefix == NULL ||
+        command == NULL ||
+        target == NULL
+    )
+    {
+        return 0;
+    }
+
+
+    if (
+        strcmp(
+            command,
+            "PRIVMSG"
+        ) != 0
+    )
+    {
+        return 0;
+    }
+
+
+    /*
+     * Only direct messages addressed to Rictus
+     * enter the command interface.
+     *
+     * Channel PRIVMSG traffic remains ordinary
+     * IRC traffic.
+     */
+
+    if (
+        strcmp(
+            target,
+            config->irc_nick
+        ) != 0
+    )
+    {
+        return 0;
+    }
+
+
+    /*
+     * The remainder of the line is the message.
+     */
+
+    text =
+        context;
+
+
+    if (
+        text == NULL
+    )
+    {
+        return 1;
+    }
+
+
+    while (
+        *text == ' '
+    )
+    {
+        ++text;
+    }
+
+
+    if (
+        *text == ':'
+    )
+    {
+        ++text;
+    }
+
+
+    if (
+        *text == '\0'
+    )
+    {
+        return 1;
+    }
+
+
+    /*
+     * Only command text enters the command
+     * callback.
+     */
+
+    if (
+        text[0] != '!'
+    )
+    {
+        return 1;
+    }
+
+
+    /*
+     * Extract sender nick from:
+     *
+     * :nick!user@host
+     */
+
+    if (
+        prefix[0] == ':'
+    )
+    {
+        ++prefix;
+    }
+
+
+    bang =
+        strchr(
+            prefix,
+            '!'
+        );
+
+
+    if (
+        bang != NULL
+    )
+    {
+        sender_length =
+            (size_t)
+            (bang - prefix);
+    }
+    else
+    {
+        sender_length =
+            strlen(prefix);
+    }
+
+
+    if (
+        sender_length == 0 ||
+        sender_length >=
+        sizeof(sender)
+    )
+    {
+        rictus_log_write(
+            "WARN",
+            "IRC_COMMAND_SENDER_INVALID",
+            ""
+        );
+
+        return 1;
+    }
+
+
+    memcpy(
+        sender,
+        prefix,
+        sender_length
+    );
+
+
+    sender[
+        sender_length
+    ] =
+        '\0';
+
+
+    rictus_log_write(
+        "INFO",
+        "IRC_COMMAND_RECEIVED",
+        "sender=%s",
+        sender
+    );
+
+
+    /*
+     * Command parsing and dispatch belong to Core.
+     */
+
+    if (
+        g_command_callback == NULL
+    )
+    {
+        rictus_log_write(
+            "WARN",
+            "IRC_COMMAND_NO_HANDLER",
+            "sender=%s",
+            sender
+        );
+
+        return 1;
+    }
+
+
+    if (
+        !g_command_callback(
+            sender,
+            text,
+            g_command_callback_context
+        )
+    )
+    {
+        rictus_log_write(
+            "ERROR",
+            "IRC_COMMAND_CALLBACK_FAILED",
+            "sender=%s",
+            sender
+        );
+
+        return 1;
+    }
+
+
+    rictus_log_write(
+        "INFO",
+        "IRC_COMMAND_DELIVERED",
+        "sender=%s",
+        sender
+    );
+
+
+    return 1;
+}
 
 
 /*
@@ -39,6 +380,7 @@ static int parse_rictus_mode(
     char *mode;
     char *target;
 
+
     if (
         line == NULL ||
         config == NULL
@@ -46,6 +388,7 @@ static int parse_rictus_mode(
     {
         return 0;
     }
+
 
     if (
         strlen(line) >=
@@ -55,41 +398,53 @@ static int parse_rictus_mode(
         return 0;
     }
 
+
     strcpy_s(
         copy,
         sizeof(copy),
         line
     );
 
-    source = strtok_s(
-        copy,
-        " ",
-        &context
-    );
 
-    command = strtok_s(
-        NULL,
-        " ",
-        &context
-    );
+    source =
+        strtok_s(
+            copy,
+            " ",
+            &context
+        );
 
-    channel = strtok_s(
-        NULL,
-        " ",
-        &context
-    );
 
-    mode = strtok_s(
-        NULL,
-        " ",
-        &context
-    );
+    command =
+        strtok_s(
+            NULL,
+            " ",
+            &context
+        );
 
-    target = strtok_s(
-        NULL,
-        " ",
-        &context
-    );
+
+    channel =
+        strtok_s(
+            NULL,
+            " ",
+            &context
+        );
+
+
+    mode =
+        strtok_s(
+            NULL,
+            " ",
+            &context
+        );
+
+
+    target =
+        strtok_s(
+            NULL,
+            " ",
+            &context
+        );
+
 
     if (
         source == NULL ||
@@ -102,6 +457,7 @@ static int parse_rictus_mode(
         return 0;
     }
 
+
     if (
         strcmp(
             command,
@@ -111,6 +467,7 @@ static int parse_rictus_mode(
     {
         return 0;
     }
+
 
     if (
         strcmp(
@@ -122,6 +479,7 @@ static int parse_rictus_mode(
         return 0;
     }
 
+
     if (
         strcmp(
             target,
@@ -132,12 +490,14 @@ static int parse_rictus_mode(
         return 0;
     }
 
+
     if (
         source[0] == ':'
     )
     {
         ++source;
     }
+
 
     if (
         strcmp(
@@ -158,6 +518,7 @@ static int parse_rictus_mode(
         return 1;
     }
 
+
     if (
         strcmp(
             mode,
@@ -176,6 +537,7 @@ static int parse_rictus_mode(
 
         return 1;
     }
+
 
     if (
         strcmp(
@@ -196,6 +558,7 @@ static int parse_rictus_mode(
         return 1;
     }
 
+
     if (
         strcmp(
             mode,
@@ -215,6 +578,7 @@ static int parse_rictus_mode(
         return 1;
     }
 
+
     rictus_log_write(
         "INFO",
         "CHANNEL_MODE",
@@ -224,6 +588,7 @@ static int parse_rictus_mode(
         mode,
         target
     );
+
 
     return 1;
 }
@@ -241,9 +606,12 @@ int irc_send(
     const char *line
 )
 {
-    char buffer[2048];
+    char buffer[
+        2048
+    ];
 
     int length;
+
 
     if (
         tls == NULL ||
@@ -253,12 +621,15 @@ int irc_send(
         return 0;
     }
 
-    length = snprintf(
-        buffer,
-        sizeof(buffer),
-        "%s\r\n",
-        line
-    );
+
+    length =
+        snprintf(
+            buffer,
+            sizeof(buffer),
+            "%s\r\n",
+            line
+        );
+
 
     if (
         length <= 0 ||
@@ -269,9 +640,11 @@ int irc_send(
         return 0;
     }
 
+
     /*
      * Never expose SASL credential payloads.
      */
+
     if (
         strncmp(
             line,
@@ -288,6 +661,7 @@ int irc_send(
             ">> AUTHENTICATE <redacted>\n"
         );
 
+
         rictus_log_write(
             "INFO",
             "IRC_TX",
@@ -301,6 +675,7 @@ int irc_send(
             line
         );
 
+
         rictus_log_write(
             "INFO",
             "IRC_TX",
@@ -309,12 +684,14 @@ int irc_send(
         );
     }
 
-    return tls_send(
-        tls,
-        socket,
-        buffer,
-        length
-    );
+
+    return
+        tls_send(
+            tls,
+            socket,
+            buffer,
+            length
+        );
 }
 
 
@@ -342,20 +719,24 @@ int irc_handle_line(
         return 0;
     }
 
+
     printf(
         "<< %s\n",
         line
     );
 
+
     /*
      * Preserve raw IRC traffic.
      */
+
     rictus_log_write(
         "INFO",
         "IRC_RX",
         "%s",
         line
     );
+
 
     /*
      * ------------------------------------------------
@@ -371,9 +752,12 @@ int irc_handle_line(
         ) == 0
     )
     {
-        char pong[1024];
+        char pong[
+            1024
+        ];
 
         int length;
+
 
         rictus_log_write(
             "INFO",
@@ -382,12 +766,15 @@ int irc_handle_line(
             line + 5
         );
 
-        length = snprintf(
-            pong,
-            sizeof(pong),
-            "PONG %s",
-            line + 5
-        );
+
+        length =
+            snprintf(
+                pong,
+                sizeof(pong),
+                "PONG %s",
+                line + 5
+            );
+
 
         if (
             length <= 0 ||
@@ -403,6 +790,7 @@ int irc_handle_line(
 
             return 0;
         }
+
 
         if (
             !irc_send(
@@ -421,6 +809,7 @@ int irc_handle_line(
             return 0;
         }
 
+
         rictus_log_write(
             "INFO",
             "PONG",
@@ -428,8 +817,10 @@ int irc_handle_line(
             line + 5
         );
 
+
         return 1;
     }
+
 
     /*
      * ------------------------------------------------
@@ -459,6 +850,7 @@ int irc_handle_line(
             "server advertises SASL"
         );
 
+
         if (
             !irc_send(
                 tls,
@@ -476,11 +868,14 @@ int irc_handle_line(
             return 0;
         }
 
+
         state->sasl_requested =
             1;
 
+
         return 1;
     }
+
 
     if (
         strstr(
@@ -504,6 +899,7 @@ int irc_handle_line(
             "server accepted SASL capability"
         );
 
+
         if (
             !irc_send(
                 tls,
@@ -521,11 +917,14 @@ int irc_handle_line(
             return 0;
         }
 
+
         state->sasl_started =
             1;
 
+
         return 1;
     }
+
 
     if (
         strcmp(
@@ -535,11 +934,16 @@ int irc_handle_line(
         !state->sasl_payload_sent
     )
     {
-        char payload[1024];
+        char payload[
+            1024
+        ];
 
-        char authenticate_command[1200];
+        char authenticate_command[
+            1200
+        ];
 
         int length;
+
 
         memset(
             payload,
@@ -547,11 +951,13 @@ int irc_handle_line(
             sizeof(payload)
         );
 
+
         memset(
             authenticate_command,
             0,
             sizeof(authenticate_command)
         );
+
 
         if (
             !sasl_build_plain(
@@ -567,20 +973,25 @@ int irc_handle_line(
                 ""
             );
 
+
             SecureZeroMemory(
                 payload,
                 sizeof(payload)
             );
 
+
             return 0;
         }
 
-        length = snprintf(
-            authenticate_command,
-            sizeof(authenticate_command),
-            "AUTHENTICATE %s",
-            payload
-        );
+
+        length =
+            snprintf(
+                authenticate_command,
+                sizeof(authenticate_command),
+                "AUTHENTICATE %s",
+                payload
+            );
+
 
         if (
             length <= 0 ||
@@ -594,18 +1005,22 @@ int irc_handle_line(
                 ""
             );
 
+
             SecureZeroMemory(
                 authenticate_command,
                 sizeof(authenticate_command)
             );
+
 
             SecureZeroMemory(
                 payload,
                 sizeof(payload)
             );
 
+
             return 0;
         }
+
 
         if (
             !irc_send(
@@ -621,34 +1036,42 @@ int irc_handle_line(
                 ""
             );
 
+
             SecureZeroMemory(
                 authenticate_command,
                 sizeof(authenticate_command)
             );
+
 
             SecureZeroMemory(
                 payload,
                 sizeof(payload)
             );
 
+
             return 0;
         }
+
 
         SecureZeroMemory(
             authenticate_command,
             sizeof(authenticate_command)
         );
 
+
         SecureZeroMemory(
             payload,
             sizeof(payload)
         );
 
+
         state->sasl_payload_sent =
             1;
 
+
         return 1;
     }
+
 
     if (
         strstr(
@@ -661,9 +1084,11 @@ int irc_handle_line(
         state->sasl_complete =
             1;
 
+
         printf(
             "SASL authentication successful.\n"
         );
+
 
         rictus_log_write(
             "INFO",
@@ -671,6 +1096,7 @@ int irc_handle_line(
             "account=%s",
             config->irc_account
         );
+
 
         if (
             !irc_send(
@@ -689,8 +1115,10 @@ int irc_handle_line(
             return 0;
         }
 
+
         return 1;
     }
+
 
     if (
         strstr(
@@ -717,13 +1145,16 @@ int irc_handle_line(
             "server rejected authentication"
         );
 
+
         fprintf(
             stderr,
             "SASL authentication failed.\n"
         );
 
+
         return 0;
     }
+
 
     /*
      * ------------------------------------------------
@@ -742,9 +1173,11 @@ int irc_handle_line(
         state->registered =
             1;
 
+
         printf(
             "IRC registration complete.\n"
         );
+
 
         rictus_log_write(
             "INFO",
@@ -753,21 +1186,27 @@ int irc_handle_line(
             config->irc_nick
         );
 
+
         if (
             state->sasl_complete &&
             !state->joined
         )
         {
-            char join_command[512];
+            char join_command[
+                512
+            ];
 
             int length;
 
-            length = snprintf(
-                join_command,
-                sizeof(join_command),
-                "JOIN %s",
-                config->irc_channel
-            );
+
+            length =
+                snprintf(
+                    join_command,
+                    sizeof(join_command),
+                    "JOIN %s",
+                    config->irc_channel
+                );
+
 
             if (
                 length <= 0 ||
@@ -782,8 +1221,10 @@ int irc_handle_line(
                     config->irc_channel
                 );
 
+
                 return 0;
             }
+
 
             if (
                 !irc_send(
@@ -800,13 +1241,16 @@ int irc_handle_line(
                     config->irc_channel
                 );
 
+
                 return 0;
             }
+
 
             printf(
                 "Channel join requested: %s\n",
                 config->irc_channel
             );
+
 
             rictus_log_write(
                 "INFO",
@@ -816,8 +1260,35 @@ int irc_handle_line(
             );
         }
 
+
         return 1;
     }
+
+
+    /*
+     * ------------------------------------------------
+     * PRIVATE COMMAND INTAKE
+     * ------------------------------------------------
+     */
+
+    if (
+        strstr(
+            line,
+            " PRIVMSG "
+        ) != NULL
+    )
+    {
+        if (
+            parse_private_privmsg(
+                line,
+                config
+            )
+        )
+        {
+            return 1;
+        }
+    }
+
 
     /*
      * ------------------------------------------------
@@ -855,10 +1326,12 @@ int irc_handle_line(
             state->joined =
                 1;
 
+
             printf(
                 "Rictus joined %s.\n",
                 config->irc_channel
             );
+
 
             rictus_log_write(
                 "INFO",
@@ -868,8 +1341,10 @@ int irc_handle_line(
             );
         }
 
+
         return 1;
     }
+
 
     if (
         strstr(
@@ -889,6 +1364,7 @@ int irc_handle_line(
         state->joined =
             0;
 
+
         rictus_log_write(
             "WARN",
             "CHANNEL_STATE",
@@ -897,8 +1373,10 @@ int irc_handle_line(
             line
         );
 
+
         return 1;
     }
+
 
     if (
         strstr(
@@ -918,6 +1396,7 @@ int irc_handle_line(
         state->joined =
             0;
 
+
         rictus_log_write(
             "WARN",
             "CHANNEL_STATE",
@@ -926,8 +1405,10 @@ int irc_handle_line(
             line
         );
 
+
         return 1;
     }
+
 
     /*
      * ------------------------------------------------
@@ -947,8 +1428,10 @@ int irc_handle_line(
             config
         );
 
+
         return 1;
     }
+
 
     /*
      * ------------------------------------------------
@@ -976,8 +1459,10 @@ int irc_handle_line(
             line
         );
 
+
         return 1;
     }
+
 
     return 1;
 }

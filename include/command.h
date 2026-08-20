@@ -127,6 +127,16 @@ rictus_command_dispatch(
 );
 
 
+rictus_command_result_t
+rictus_command_process(
+    const char *sender,
+    const char *account,
+    const char *text,
+    rictus_command_reply_fn reply,
+    void *reply_context
+);
+
+
 const char *
 rictus_command_result_string(
     rictus_command_result_t result
