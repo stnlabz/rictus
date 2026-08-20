@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include "module.h"
+
 
 #define RICTUS_COMMAND_NAME_MAX      64
 #define RICTUS_COMMAND_ARGUMENTS_MAX 512
@@ -80,6 +82,15 @@ typedef struct
     void *
         context;
 
+    int
+        module_owned;
+
+    rictus_module_command_handler_fn
+        module_handler;
+
+    void *
+        module_context;
+
 } rictus_command_handler_t;
 
 
@@ -134,6 +145,30 @@ rictus_command_process(
     const char *text,
     rictus_command_reply_fn reply,
     void *reply_context
+);
+
+
+/*
+ * ------------------------------------------------
+ * MODULE COMMAND SERVICES
+ * ------------------------------------------------
+ *
+ * These functions form Core's adapter between the
+ * module ABI and the private Core command registry.
+ */
+
+int
+rictus_command_register_module(
+    const char *name,
+    rictus_module_command_handler_fn handler,
+    void *handler_context
+);
+
+
+int
+rictus_command_unregister_module(
+    const char *name,
+    void *handler_context
 );
 
 

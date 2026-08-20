@@ -42,6 +42,7 @@
 #include "irc.h"
 #include "session.h"
 #include "shutdown.h"
+#include "command.h"
 
 #include "module.h"
 #include "module_discovery.h"
@@ -208,6 +209,111 @@ rictus_module_send_message(
 
 /*
  * ------------------------------------------------
+ * MODULE COMMAND REGISTRATION
+ * ------------------------------------------------
+ */
+
+static int
+rictus_module_register_command(
+    const char* name,
+    rictus_module_command_handler_fn handler,
+    void* handler_context
+)
+{
+    if (
+        name == NULL ||
+        handler == NULL
+        )
+    {
+        return 0;
+    }
+
+
+    if (
+        !rictus_command_register_module(
+            name,
+            handler,
+            handler_context
+        )
+        )
+    {
+        rictus_log_write(
+            "ERROR",
+            "MODULE_COMMAND_REGISTER_FAILED",
+            "command=%s",
+            name
+        );
+
+
+        return 0;
+    }
+
+
+    rictus_log_write(
+        "INFO",
+        "MODULE_COMMAND_REGISTERED",
+        "command=%s",
+        name
+    );
+
+
+    return 1;
+}
+
+
+/*
+ * ------------------------------------------------
+ * MODULE COMMAND UNREGISTRATION
+ * ------------------------------------------------
+ */
+
+static int
+rictus_module_unregister_command(
+    const char* name,
+    void* handler_context
+)
+{
+    if (
+        name == NULL
+        )
+    {
+        return 0;
+    }
+
+
+    if (
+        !rictus_command_unregister_module(
+            name,
+            handler_context
+        )
+        )
+    {
+        rictus_log_write(
+            "ERROR",
+            "MODULE_COMMAND_UNREGISTER_FAILED",
+            "command=%s",
+            name
+        );
+
+
+        return 0;
+    }
+
+
+    rictus_log_write(
+        "INFO",
+        "MODULE_COMMAND_UNREGISTERED",
+        "command=%s",
+        name
+    );
+
+
+    return 1;
+}
+
+
+/*
+ * ------------------------------------------------
  * MODULE HOST API
  * ------------------------------------------------
  */
@@ -215,7 +321,9 @@ rictus_module_send_message(
 static const rictus_module_host_t
 g_module_host =
 {
-    rictus_module_send_message
+    rictus_module_send_message,
+    rictus_module_register_command,
+    rictus_module_unregister_command
 };
 
 

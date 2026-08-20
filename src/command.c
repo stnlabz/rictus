@@ -1,9 +1,25 @@
 #include <ctype.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "command.h"
 
+
+static rictus_command_registry_t
+g_command_registry;
+
+
+static int
+g_command_registry_initialized =
+    0;
+
+
+/*
+ * ------------------------------------------------
+ * COMMAND NAME VALIDATION
+ * ------------------------------------------------
+ */
 
 static int
 rictus_command_name_valid(
@@ -51,6 +67,12 @@ rictus_command_name_valid(
 }
 
 
+/*
+ * ------------------------------------------------
+ * COMMAND NAME NORMALIZATION
+ * ------------------------------------------------
+ */
+
 static void
 rictus_command_name_normalize(
     char *name
@@ -83,6 +105,44 @@ rictus_command_name_normalize(
 }
 
 
+/*
+ * ------------------------------------------------
+ * GLOBAL REGISTRY INITIALIZATION
+ * ------------------------------------------------
+ */
+
+static int
+rictus_command_initialize(
+    void
+)
+{
+    if (
+        g_command_registry_initialized
+    )
+    {
+        return 1;
+    }
+
+
+    rictus_command_registry_init(
+        &g_command_registry
+    );
+
+
+    g_command_registry_initialized =
+        1;
+
+
+    return 1;
+}
+
+
+/*
+ * ------------------------------------------------
+ * REGISTRY INIT
+ * ------------------------------------------------
+ */
+
 void
 rictus_command_registry_init(
     rictus_command_registry_t *registry
@@ -104,6 +164,12 @@ rictus_command_registry_init(
 }
 
 
+/*
+ * ------------------------------------------------
+ * REGISTER CORE COMMAND
+ * ------------------------------------------------
+ */
+
 rictus_command_result_t
 rictus_command_register(
     rictus_command_registry_t *registry,
@@ -117,6 +183,9 @@ rictus_command_register(
     ];
 
     size_t index;
+
+    rictus_command_handler_t
+        *entry;
 
 
     if (
@@ -194,37 +263,37 @@ rictus_command_register(
     }
 
 
-    strcpy_s(
-        registry
+    entry =
+        &registry
             ->handlers[
                 registry->count
-            ]
-            .name,
-        sizeof(
-            registry
-                ->handlers[
-                    registry->count
-                ]
-                .name
-        ),
+            ];
+
+
+    memset(
+        entry,
+        0,
+        sizeof(*entry)
+    );
+
+
+    strcpy_s(
+        entry->name,
+        sizeof(entry->name),
         normalized
     );
 
 
-    registry
-        ->handlers[
-            registry->count
-        ]
-        .handler =
-            handler;
+    entry->handler =
+        handler;
 
 
-    registry
-        ->handlers[
-            registry->count
-        ]
-        .context =
-            context;
+    entry->context =
+        context;
+
+
+    entry->module_owned =
+        0;
 
 
     ++registry->count;
@@ -234,6 +303,307 @@ rictus_command_register(
         RICTUS_COMMAND_OK;
 }
 
+
+/*
+ * ------------------------------------------------
+ * REGISTER MODULE COMMAND
+ * ------------------------------------------------
+ */
+
+int
+rictus_command_register_module(
+    const char *name,
+    rictus_module_command_handler_fn handler,
+    void *handler_context
+)
+{
+    char normalized[
+        RICTUS_COMMAND_NAME_MAX
+    ];
+
+    size_t index;
+
+    rictus_command_handler_t
+        *entry;
+
+
+    if (
+        name == NULL ||
+        handler == NULL
+    )
+    {
+        return 0;
+    }
+
+
+    if (
+        !rictus_command_initialize()
+    )
+    {
+        return 0;
+    }
+
+
+    if (
+        strlen(name) >=
+        sizeof(normalized)
+    )
+    {
+        return 0;
+    }
+
+
+    strcpy_s(
+        normalized,
+        sizeof(normalized),
+        name
+    );
+
+
+    rictus_command_name_normalize(
+        normalized
+    );
+
+
+    if (
+        !rictus_command_name_valid(
+            normalized
+        )
+    )
+    {
+        return 0;
+    }
+
+
+    /*
+     * A command name has one owner.
+     */
+
+    for (
+        index = 0;
+        index < g_command_registry.count;
+        ++index
+    )
+    {
+        if (
+            strcmp(
+                g_command_registry
+                    .handlers[index]
+                    .name,
+                normalized
+            ) == 0
+        )
+        {
+            return 0;
+        }
+    }
+
+
+    if (
+        g_command_registry.count >=
+        RICTUS_COMMAND_REGISTRY_MAX
+    )
+    {
+        return 0;
+    }
+
+
+    entry =
+        &g_command_registry
+            .handlers[
+                g_command_registry.count
+            ];
+
+
+    memset(
+        entry,
+        0,
+        sizeof(*entry)
+    );
+
+
+    strcpy_s(
+        entry->name,
+        sizeof(entry->name),
+        normalized
+    );
+
+
+    entry->module_owned =
+        1;
+
+
+    entry->module_handler =
+        handler;
+
+
+    entry->module_context =
+        handler_context;
+
+
+    ++g_command_registry.count;
+
+
+    return 1;
+}
+
+
+/*
+ * ------------------------------------------------
+ * UNREGISTER MODULE COMMAND
+ * ------------------------------------------------
+ */
+
+int
+rictus_command_unregister_module(
+    const char *name,
+    void *handler_context
+)
+{
+    char normalized[
+        RICTUS_COMMAND_NAME_MAX
+    ];
+
+    size_t index;
+
+
+    if (
+        name == NULL
+    )
+    {
+        return 0;
+    }
+
+
+    if (
+        !rictus_command_initialize()
+    )
+    {
+        return 0;
+    }
+
+
+    if (
+        strlen(name) >=
+        sizeof(normalized)
+    )
+    {
+        return 0;
+    }
+
+
+    strcpy_s(
+        normalized,
+        sizeof(normalized),
+        name
+    );
+
+
+    rictus_command_name_normalize(
+        normalized
+    );
+
+
+    for (
+        index = 0;
+        index < g_command_registry.count;
+        ++index
+    )
+    {
+        rictus_command_handler_t
+            *entry;
+
+
+        entry =
+            &g_command_registry
+                .handlers[index];
+
+
+        if (
+            !entry->module_owned
+        )
+        {
+            continue;
+        }
+
+
+        if (
+            strcmp(
+                entry->name,
+                normalized
+            ) != 0
+        )
+        {
+            continue;
+        }
+
+
+        if (
+            entry->module_context !=
+            handler_context
+        )
+        {
+            continue;
+        }
+
+
+        /*
+         * Compact the registry so no stale module
+         * function pointer remains after unload.
+         */
+
+        if (
+            index + 1 <
+            g_command_registry.count
+        )
+        {
+            memmove(
+                &g_command_registry
+                    .handlers[index],
+                &g_command_registry
+                    .handlers[index + 1],
+                (
+                    g_command_registry.count -
+                    index -
+                    1
+                ) *
+                sizeof(
+                    g_command_registry
+                        .handlers[0]
+                )
+            );
+        }
+
+
+        --g_command_registry.count;
+
+
+        memset(
+            &g_command_registry
+                .handlers[
+                    g_command_registry.count
+                ],
+            0,
+            sizeof(
+                g_command_registry
+                    .handlers[0]
+            )
+        );
+
+
+        return 1;
+    }
+
+
+    return 0;
+}
+
+
+/*
+ * ------------------------------------------------
+ * PARSE COMMAND
+ * ------------------------------------------------
+ */
 
 rictus_command_result_t
 rictus_command_parse(
@@ -428,6 +798,119 @@ rictus_command_parse(
 }
 
 
+/*
+ * ------------------------------------------------
+ * MODULE DISPATCH ADAPTER
+ * ------------------------------------------------
+ */
+
+static rictus_command_result_t
+rictus_command_dispatch_module(
+    const rictus_command_handler_t *handler,
+    const rictus_command_t *command,
+    rictus_command_reply_fn reply,
+    void *reply_context
+)
+{
+    rictus_module_command_t
+        module_command;
+
+    rictus_module_result_t
+        module_result;
+
+
+    if (
+        handler == NULL ||
+        command == NULL ||
+        reply == NULL ||
+        handler->module_handler == NULL
+    )
+    {
+        return
+            RICTUS_COMMAND_INVALID;
+    }
+
+
+    memset(
+        &module_command,
+        0,
+        sizeof(module_command)
+    );
+
+
+    strcpy_s(
+        module_command.sender,
+        sizeof(module_command.sender),
+        command->sender
+    );
+
+
+    strcpy_s(
+        module_command.account,
+        sizeof(module_command.account),
+        command->account
+    );
+
+
+    strcpy_s(
+        module_command.name,
+        sizeof(module_command.name),
+        command->name
+    );
+
+
+    strcpy_s(
+        module_command.arguments,
+        sizeof(module_command.arguments),
+        command->arguments
+    );
+
+
+    module_result =
+        handler->module_handler(
+            &module_command,
+            reply,
+            reply_context,
+            handler->module_context
+        );
+
+
+    switch (
+        module_result
+    )
+    {
+        case RICTUS_MODULE_OK:
+
+            return
+                RICTUS_COMMAND_OK;
+
+
+        case RICTUS_MODULE_ERR_NOT_FOUND:
+
+            return
+                RICTUS_COMMAND_NOT_FOUND;
+
+
+        case RICTUS_MODULE_ERR_NOT_AUTHORIZED:
+
+            return
+                RICTUS_COMMAND_DENIED;
+
+
+        default:
+
+            return
+                RICTUS_COMMAND_FAILED;
+    }
+}
+
+
+/*
+ * ------------------------------------------------
+ * DISPATCH COMMAND
+ * ------------------------------------------------
+ */
+
 rictus_command_result_t
 rictus_command_dispatch(
     const rictus_command_registry_t *registry,
@@ -476,6 +959,29 @@ rictus_command_dispatch(
         }
 
 
+        if (
+            handler->module_owned
+        )
+        {
+            return
+                rictus_command_dispatch_module(
+                    handler,
+                    command,
+                    reply,
+                    reply_context
+                );
+        }
+
+
+        if (
+            handler->handler == NULL
+        )
+        {
+            return
+                RICTUS_COMMAND_FAILED;
+        }
+
+
         return
             handler->handler(
                 command,
@@ -490,6 +996,113 @@ rictus_command_dispatch(
         RICTUS_COMMAND_NOT_FOUND;
 }
 
+
+/*
+ * ------------------------------------------------
+ * PROCESS COMMAND
+ * ------------------------------------------------
+ */
+
+rictus_command_result_t
+rictus_command_process(
+    const char *sender,
+    const char *account,
+    const char *text,
+    rictus_command_reply_fn reply,
+    void *reply_context
+)
+{
+    rictus_command_t
+        command;
+
+    rictus_command_result_t
+        result;
+
+
+    if (
+        sender == NULL ||
+        account == NULL ||
+        text == NULL ||
+        reply == NULL
+    )
+    {
+        return
+            RICTUS_COMMAND_INVALID;
+    }
+
+
+    if (
+        !rictus_command_initialize()
+    )
+    {
+        return
+            RICTUS_COMMAND_FAILED;
+    }
+
+
+    memset(
+        &command,
+        0,
+        sizeof(command)
+    );
+
+
+    result =
+        rictus_command_parse(
+            sender,
+            account,
+            text,
+            &command
+        );
+
+
+    if (
+        result !=
+        RICTUS_COMMAND_OK
+    )
+    {
+        return
+            result;
+    }
+
+
+    result =
+        rictus_command_dispatch(
+            &g_command_registry,
+            &command,
+            reply,
+            reply_context
+        );
+
+
+    if (
+        result ==
+        RICTUS_COMMAND_NOT_FOUND
+    )
+    {
+        if (
+            !reply(
+                reply_context,
+                "Unknown command."
+            )
+        )
+        {
+            return
+                RICTUS_COMMAND_FAILED;
+        }
+    }
+
+
+    return
+        result;
+}
+
+
+/*
+ * ------------------------------------------------
+ * RESULT STRING
+ * ------------------------------------------------
+ */
 
 const char *
 rictus_command_result_string(

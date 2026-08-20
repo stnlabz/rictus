@@ -11,37 +11,101 @@
 #include "tls_win.h"
 #include "sasl.h"
 #include "irc.h"
+#include "command.h"
 
 
 #define IRC_BUFFER_SIZE 8192
+#define IRC_COMMAND_BUFFER_SIZE 1024
+
+
+typedef struct
+{
+    rictus_tls *tls;
+
+    SOCKET socket;
+
+    char target[
+        256
+    ];
+
+} rictus_irc_command_reply_context;
 
 
 /*
  * ------------------------------------------------
- * COMMAND CALLBACK
+ * COMMAND REPLY
  * ------------------------------------------------
  */
 
-static rictus_irc_command_callback_fn
-g_command_callback =
-    NULL;
-
-
-static void *
-g_command_callback_context =
-    NULL;
-
-
-void irc_set_command_callback(
-    rictus_irc_command_callback_fn callback,
-    void *context
+static int
+irc_command_reply(
+    void *context,
+    const char *message
 )
 {
-    g_command_callback =
-        callback;
+    rictus_irc_command_reply_context
+        *reply_context;
 
-    g_command_callback_context =
+    char command[
+        IRC_COMMAND_BUFFER_SIZE
+    ];
+
+    int written;
+
+
+    if (
+        context == NULL ||
+        message == NULL ||
+        message[0] == '\0'
+    )
+    {
+        return 0;
+    }
+
+
+    reply_context =
+        (rictus_irc_command_reply_context *)
         context;
+
+
+    if (
+        reply_context->tls == NULL ||
+        reply_context->socket ==
+            INVALID_SOCKET ||
+        reply_context->target[0] ==
+            '\0'
+    )
+    {
+        return 0;
+    }
+
+
+    written =
+        snprintf(
+            command,
+            sizeof(command),
+            "PRIVMSG %s :%s",
+            reply_context->target,
+            message
+        );
+
+
+    if (
+        written <= 0 ||
+        written >=
+            (int)sizeof(command)
+    )
+    {
+        return 0;
+    }
+
+
+    return
+        irc_send(
+            reply_context->tls,
+            reply_context->socket,
+            command
+        );
 }
 
 
@@ -51,7 +115,10 @@ void irc_set_command_callback(
  * ------------------------------------------------
  */
 
-static int parse_private_privmsg(
+static int
+parse_private_privmsg(
+    rictus_tls *tls,
+    SOCKET socket,
     const char *line,
     const rictus_config *config
 )
@@ -76,8 +143,15 @@ static int parse_private_privmsg(
 
     size_t sender_length;
 
+    rictus_irc_command_reply_context
+        reply_context;
+
+    rictus_command_result_t
+        command_result;
+
 
     if (
+        tls == NULL ||
         line == NULL ||
         config == NULL
     )
@@ -94,12 +168,6 @@ static int parse_private_privmsg(
         return 0;
     }
 
-
-    /*
-     * IRC user messages use a source prefix:
-     *
-     * :nick!user@host PRIVMSG target :message
-     */
 
     if (
         line[0] != ':'
@@ -162,11 +230,7 @@ static int parse_private_privmsg(
 
 
     /*
-     * Only direct messages addressed to Rictus
-     * enter the command interface.
-     *
-     * Channel PRIVMSG traffic remains ordinary
-     * IRC traffic.
+     * Direct PM only.
      */
 
     if (
@@ -179,10 +243,6 @@ static int parse_private_privmsg(
         return 0;
     }
 
-
-    /*
-     * The remainder of the line is the message.
-     */
 
     text =
         context;
@@ -221,8 +281,7 @@ static int parse_private_privmsg(
 
 
     /*
-     * Only command text enters the command
-     * callback.
+     * Ordinary PM text is not a command.
      */
 
     if (
@@ -232,12 +291,6 @@ static int parse_private_privmsg(
         return 1;
     }
 
-
-    /*
-     * Extract sender nick from:
-     *
-     * :nick!user@host
-     */
 
     if (
         prefix[0] == ':'
@@ -281,6 +334,7 @@ static int parse_private_privmsg(
             ""
         );
 
+
         return 1;
     }
 
@@ -298,57 +352,59 @@ static int parse_private_privmsg(
         '\0';
 
 
-    rictus_log_write(
-        "INFO",
-        "IRC_COMMAND_RECEIVED",
-        "sender=%s",
+    memset(
+        &reply_context,
+        0,
+        sizeof(reply_context)
+    );
+
+
+    reply_context.tls =
+        tls;
+
+
+    reply_context.socket =
+        socket;
+
+
+    strcpy_s(
+        reply_context.target,
+        sizeof(reply_context.target),
         sender
     );
 
 
-    /*
-     * Command parsing and dispatch belong to Core.
-     */
-
-    if (
-        g_command_callback == NULL
-    )
-    {
-        rictus_log_write(
-            "WARN",
-            "IRC_COMMAND_NO_HANDLER",
-            "sender=%s",
-            sender
-        );
-
-        return 1;
-    }
+    rictus_log_write(
+        "INFO",
+        "COMMAND_RECEIVED",
+        "transport=IRC sender=%s",
+        sender
+    );
 
 
-    if (
-        !g_command_callback(
+    command_result =
+        rictus_command_process(
             sender,
+            "",
             text,
-            g_command_callback_context
-        )
-    )
-    {
-        rictus_log_write(
-            "ERROR",
-            "IRC_COMMAND_CALLBACK_FAILED",
-            "sender=%s",
-            sender
+            irc_command_reply,
+            &reply_context
         );
-
-        return 1;
-    }
 
 
     rictus_log_write(
-        "INFO",
-        "IRC_COMMAND_DELIVERED",
-        "sender=%s",
-        sender
+        command_result ==
+            RICTUS_COMMAND_OK ||
+        command_result ==
+            RICTUS_COMMAND_NOT_FOUND
+        ? "INFO"
+        : "WARN",
+        "COMMAND_RESULT",
+        "transport=IRC sender=%s result=%s",
+        sender,
+        rictus_command_result_string(
+            command_result
+        )
     );
 
 
@@ -362,7 +418,8 @@ static int parse_private_privmsg(
  * ------------------------------------------------
  */
 
-static int parse_rictus_mode(
+static int
+parse_rictus_mode(
     const char *line,
     const rictus_config *config
 )
@@ -515,6 +572,7 @@ static int parse_rictus_mode(
             target
         );
 
+
         return 1;
     }
 
@@ -534,6 +592,7 @@ static int parse_rictus_mode(
             channel,
             target
         );
+
 
         return 1;
     }
@@ -555,6 +614,7 @@ static int parse_rictus_mode(
             target
         );
 
+
         return 1;
     }
 
@@ -574,6 +634,7 @@ static int parse_rictus_mode(
             channel,
             target
         );
+
 
         return 1;
     }
@@ -600,7 +661,8 @@ static int parse_rictus_mode(
  * ------------------------------------------------
  */
 
-int irc_send(
+int
+irc_send(
     rictus_tls *tls,
     SOCKET socket,
     const char *line
@@ -640,10 +702,6 @@ int irc_send(
         return 0;
     }
 
-
-    /*
-     * Never expose SASL credential payloads.
-     */
 
     if (
         strncmp(
@@ -701,7 +759,8 @@ int irc_send(
  * ------------------------------------------------
  */
 
-int irc_handle_line(
+int
+irc_handle_line(
     rictus_tls *tls,
     SOCKET socket,
     const rictus_config *config,
@@ -725,10 +784,6 @@ int irc_handle_line(
         line
     );
 
-
-    /*
-     * Preserve raw IRC traffic.
-     */
 
     rictus_log_write(
         "INFO",
@@ -788,6 +843,7 @@ int irc_handle_line(
                 ""
             );
 
+
             return 0;
         }
 
@@ -805,6 +861,7 @@ int irc_handle_line(
                 "PONG_SEND_FAILED",
                 ""
             );
+
 
             return 0;
         }
@@ -865,6 +922,7 @@ int irc_handle_line(
                 ""
             );
 
+
             return 0;
         }
 
@@ -913,6 +971,7 @@ int irc_handle_line(
                 "SASL_START_FAILED",
                 ""
             );
+
 
             return 0;
         }
@@ -1112,6 +1171,7 @@ int irc_handle_line(
                 ""
             );
 
+
             return 0;
         }
 
@@ -1280,6 +1340,8 @@ int irc_handle_line(
     {
         if (
             parse_private_privmsg(
+                tls,
+                socket,
                 line,
                 config
             )
@@ -1294,14 +1356,6 @@ int irc_handle_line(
      * ------------------------------------------------
      * CHANNEL STATE
      * ------------------------------------------------
-     *
-     * NOTE:
-     *
-     * This logic is intentionally preserved exactly
-     * from the current Core implementation.
-     *
-     * Qualification will determine whether these
-     * matching rules are sufficiently strict.
      */
 
     if (
