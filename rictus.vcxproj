@@ -111,7 +111,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>C:\Users\Poe\Desktop\rictus\app\rictus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Poe\Documents\GitHub\rictus\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -140,9 +140,16 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\command.h" />
     <ClInclude Include="include\config.h" />
     <ClInclude Include="include\irc.h" />
     <ClInclude Include="include\log.h" />
+    <ClInclude Include="include\module.h" />
+    <ClInclude Include="include\module_catalog.h" />
+    <ClInclude Include="include\module_discovery.h" />
+    <ClInclude Include="include\module_inventory.h" />
+    <ClInclude Include="include\module_loader.h" />
+    <ClInclude Include="include\module_registry.h" />
     <ClInclude Include="include\net_win.h" />
     <ClInclude Include="include\sasl.h" />
     <ClInclude Include="include\session.h" />
@@ -150,10 +157,17 @@
     <ClInclude Include="include\tls_win.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\command.c" />
     <ClCompile Include="src\config.c" />
     <ClCompile Include="src\irc.c" />
+    <ClCompile Include="src\loader_win.c" />
     <ClCompile Include="src\log.c" />
     <ClCompile Include="src\main.c" />
+    <ClCompile Include="src\module.c" />
+    <ClCompile Include="src\module_catalog.c" />
+    <ClCompile Include="src\module_discovery_win.c" />
+    <ClCompile Include="src\module_inventory.c" />
+    <ClCompile Include="src\module_registry.c" />
     <ClCompile Include="src\net_win.c" />
     <ClCompile Include="src\sasl.c" />
     <ClCompile Include="src\session.c" />
