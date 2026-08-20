@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="rictus.vcxproj" Id="5c48c41c-7a2d-4f45-a55f-82bc96a743cc" />
+</Solution>
