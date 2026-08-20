@@ -945,6 +945,15 @@ rictus_intelligence_parse_rss(
         );
 
 
+        (void)
+        rictus_intelligence_copy(
+            item->content,
+            sizeof(item->content),
+            item->summary,
+            strlen(item->summary)
+        );
+
+
         /*
          * Title and URL form the minimum useful
          * normalized RSS intelligence object.
@@ -988,16 +997,991 @@ rictus_intelligence_parse_rss(
 
 /*
  * ------------------------------------------------
+ * HTML EVIDENCE EXTRACTION
+ * ------------------------------------------------
+ *
+ * Converts an HTML response into bounded, readable
+ * source evidence before the INT record is persisted.
+ *
+ * This is deliberately conservative:
+ *
+ * - script/style/noscript/template blocks are ignored
+ * - comments and markup are ignored
+ * - selected block tags create line boundaries
+ * - common HTML entities are decoded
+ * - repeated whitespace is collapsed
+ *
+ * The complete response remains the fingerprint input.
+ */
+
+static int
+rictus_intelligence_html_tag_name(
+    const char *input,
+    size_t input_length,
+    char *tag,
+    size_t tag_size,
+    int *closing
+)
+{
+    size_t index;
+    size_t output_index;
+
+    if (
+        input == NULL ||
+        tag == NULL ||
+        tag_size == 0 ||
+        closing == NULL
+        )
+    {
+        return 0;
+    }
+
+    tag[0] = '\0';
+    *closing = 0;
+
+    index = 0;
+
+    while (
+        index < input_length &&
+        (
+            input[index] == ' ' ||
+            input[index] == '\t' ||
+            input[index] == '\r' ||
+            input[index] == '\n'
+        )
+        )
+    {
+        ++index;
+    }
+
+    if (
+        index < input_length &&
+        input[index] == '/'
+        )
+    {
+        *closing = 1;
+        ++index;
+    }
+
+    while (
+        index < input_length &&
+        (
+            input[index] == ' ' ||
+            input[index] == '\t' ||
+            input[index] == '\r' ||
+            input[index] == '\n'
+        )
+        )
+    {
+        ++index;
+    }
+
+    output_index = 0;
+
+    while (
+        index < input_length &&
+        output_index + 1 < tag_size
+        )
+    {
+        unsigned char c =
+            (unsigned char)input[index];
+
+        if (
+            !(
+                (c >= 'A' && c <= 'Z') ||
+                (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9')
+            )
+            )
+        {
+            break;
+        }
+
+        if (c >= 'A' && c <= 'Z')
+        {
+            c =
+                (unsigned char)
+                (
+                    c - 'A' + 'a'
+                );
+        }
+
+        tag[output_index++] =
+            (char)c;
+
+        ++index;
+    }
+
+    tag[output_index] = '\0';
+
+    return output_index != 0;
+}
+
+
+static int
+rictus_intelligence_html_block_tag(
+    const char *tag
+)
+{
+    if (tag == NULL)
+    {
+        return 0;
+    }
+
+    return
+        strcmp(tag, "article") == 0 ||
+        strcmp(tag, "br") == 0 ||
+        strcmp(tag, "dd") == 0 ||
+        strcmp(tag, "div") == 0 ||
+        strcmp(tag, "dt") == 0 ||
+        strcmp(tag, "figcaption") == 0 ||
+        strcmp(tag, "footer") == 0 ||
+        strcmp(tag, "h1") == 0 ||
+        strcmp(tag, "h2") == 0 ||
+        strcmp(tag, "h3") == 0 ||
+        strcmp(tag, "h4") == 0 ||
+        strcmp(tag, "h5") == 0 ||
+        strcmp(tag, "h6") == 0 ||
+        strcmp(tag, "header") == 0 ||
+        strcmp(tag, "li") == 0 ||
+        strcmp(tag, "main") == 0 ||
+        strcmp(tag, "nav") == 0 ||
+        strcmp(tag, "p") == 0 ||
+        strcmp(tag, "section") == 0 ||
+        strcmp(tag, "td") == 0 ||
+        strcmp(tag, "th") == 0 ||
+        strcmp(tag, "tr") == 0 ||
+        strcmp(tag, "ul") == 0 ||
+        strcmp(tag, "ol") == 0;
+}
+
+
+static int
+rictus_intelligence_html_skip_tag(
+    const char *tag
+)
+{
+    if (tag == NULL)
+    {
+        return 0;
+    }
+
+    return
+        strcmp(tag, "script") == 0 ||
+        strcmp(tag, "style") == 0 ||
+        strcmp(tag, "noscript") == 0 ||
+        strcmp(tag, "template") == 0 ||
+        strcmp(tag, "svg") == 0;
+}
+
+
+static void
+rictus_intelligence_html_append_boundary(
+    char *output,
+    size_t output_size,
+    size_t *output_index
+)
+{
+    if (
+        output == NULL ||
+        output_index == NULL ||
+        output_size == 0 ||
+        *output_index == 0 ||
+        *output_index + 1 >= output_size
+        )
+    {
+        return;
+    }
+
+    if (
+        output[*output_index - 1] != '\n'
+        )
+    {
+        output[(*output_index)++] = '\n';
+        output[*output_index] = '\0';
+    }
+}
+
+
+static int
+rictus_intelligence_html_extract_text(
+    const char *html,
+    size_t html_length,
+    char *output,
+    size_t output_size
+)
+{
+    size_t input_index;
+    size_t output_index;
+    unsigned int skip_depth;
+
+    if (
+        html == NULL ||
+        output == NULL ||
+        output_size == 0
+        )
+    {
+        return 0;
+    }
+
+    output[0] = '\0';
+    input_index = 0;
+    output_index = 0;
+    skip_depth = 0;
+
+    while (
+        input_index < html_length &&
+        output_index + 1 < output_size
+        )
+    {
+        if (
+            html[input_index] == '<'
+        )
+        {
+            const char *tag_end;
+            char tag[32];
+            int closing;
+
+            if (
+                input_index + 4 <= html_length &&
+                strncmp(
+                    html + input_index,
+                    "<!--",
+                    4
+                ) == 0
+                )
+            {
+                const char *comment_end =
+                    strstr(
+                        html + input_index + 4,
+                        "-->"
+                    );
+
+                if (comment_end == NULL)
+                {
+                    break;
+                }
+
+                input_index =
+                    (size_t)
+                    (
+                        comment_end -
+                        html
+                    ) +
+                    3;
+
+                continue;
+            }
+
+            tag_end =
+                memchr(
+                    html + input_index,
+                    '>',
+                    html_length - input_index
+                );
+
+            if (tag_end == NULL)
+            {
+                break;
+            }
+
+            if (
+                rictus_intelligence_html_tag_name(
+                    html + input_index + 1,
+                    (size_t)
+                    (
+                        tag_end -
+                        (html + input_index + 1)
+                    ),
+                    tag,
+                    sizeof(tag),
+                    &closing
+                )
+                )
+            {
+                if (
+                    rictus_intelligence_html_skip_tag(
+                        tag
+                    )
+                    )
+                {
+                    if (closing)
+                    {
+                        if (skip_depth > 0)
+                        {
+                            --skip_depth;
+                        }
+                    }
+                    else
+                    {
+                        ++skip_depth;
+                    }
+                }
+                else if (
+                    skip_depth == 0 &&
+                    rictus_intelligence_html_block_tag(
+                        tag
+                    )
+                    )
+                {
+                    rictus_intelligence_html_append_boundary(
+                        output,
+                        output_size,
+                        &output_index
+                    );
+                }
+            }
+
+            input_index =
+                (size_t)
+                (
+                    tag_end -
+                    html
+                ) +
+                1;
+
+            continue;
+        }
+
+        if (skip_depth != 0)
+        {
+            ++input_index;
+            continue;
+        }
+
+        if (
+            html[input_index] == '&'
+        )
+        {
+            struct
+            {
+                const char *entity;
+                char value;
+            }
+            entities[] =
+            {
+                { "&amp;", '&' },
+                { "&lt;", '<' },
+                { "&gt;", '>' },
+                { "&quot;", '"' },
+                { "&#39;", '\'' },
+                { "&apos;", '\'' },
+                { "&nbsp;", ' ' }
+            };
+
+            size_t entity_index;
+            int decoded;
+
+            decoded = 0;
+
+            for (
+                entity_index = 0;
+                entity_index <
+                    sizeof(entities) /
+                    sizeof(entities[0]);
+                ++entity_index
+                )
+            {
+                size_t entity_length =
+                    strlen(
+                        entities[entity_index].entity
+                    );
+
+                if (
+                    input_index + entity_length <=
+                        html_length &&
+                    strncmp(
+                        html + input_index,
+                        entities[entity_index].entity,
+                        entity_length
+                    ) == 0
+                    )
+                {
+                    output[output_index++] =
+                        entities[entity_index].value;
+
+                    input_index +=
+                        entity_length;
+
+                    decoded = 1;
+                    break;
+                }
+            }
+
+            if (decoded)
+            {
+                continue;
+            }
+        }
+
+        {
+            unsigned char c =
+                (unsigned char)
+                html[input_index++];
+
+            if (
+                c == '\r' ||
+                c == '\t' ||
+                c == '\f'
+                )
+            {
+                c = ' ';
+            }
+
+            if (c == '\n')
+            {
+                c = ' ';
+            }
+
+            if (c == ' ')
+            {
+                if (
+                    output_index == 0 ||
+                    output[output_index - 1] == ' ' ||
+                    output[output_index - 1] == '\n'
+                    )
+                {
+                    continue;
+                }
+            }
+
+            output[output_index++] =
+                (char)c;
+        }
+    }
+
+    while (
+        output_index > 0 &&
+        (
+            output[output_index - 1] == ' ' ||
+            output[output_index - 1] == '\n'
+        )
+        )
+    {
+        --output_index;
+    }
+
+    output[output_index] = '\0';
+
+    return output_index != 0;
+}
+
+
+/*
+ * ------------------------------------------------
+ * NIST CSRC NEWS RECORDS
+ * ------------------------------------------------
+ *
+ * The NIST CSRC /news document is an index page.
+ * Treating the whole page as one Intelligence item
+ * produces poor downstream evidence, so this parser
+ * converts the cleaned results list into individual
+ * bounded Intelligence records.
+ *
+ * Current record shape after HTML normalization:
+ *
+ *   <title>
+ *   <date>
+ *   <description>
+ *
+ * The source page URL remains provenance until a
+ * source-specific per-record URL extractor is added.
+ */
+
+static int
+rictus_intelligence_month_name(
+    const char *value
+)
+{
+    static const char *months[] =
+    {
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December"
+    };
+
+    size_t index;
+
+    if (
+        value == NULL ||
+        value[0] == '\0'
+        )
+    {
+        return 0;
+    }
+
+    for (
+        index = 0;
+        index <
+            sizeof(months) /
+            sizeof(months[0]);
+        ++index
+        )
+    {
+        size_t length =
+            strlen(
+                months[index]
+            );
+
+        if (
+            strncmp(
+                value,
+                months[index],
+                length
+            ) == 0 &&
+            value[length] == ' '
+            )
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+static int
+rictus_intelligence_next_line(
+    const char **cursor,
+    const char *end,
+    char *output,
+    size_t output_size
+)
+{
+    const char *line_begin;
+    const char *line_end;
+
+    if (
+        cursor == NULL ||
+        *cursor == NULL ||
+        end == NULL ||
+        output == NULL ||
+        output_size == 0 ||
+        *cursor >= end
+        )
+    {
+        return 0;
+    }
+
+    while (
+        *cursor < end &&
+        (
+            **cursor == '\r' ||
+            **cursor == '\n'
+        )
+        )
+    {
+        ++(*cursor);
+    }
+
+    if (*cursor >= end)
+    {
+        return 0;
+    }
+
+    line_begin =
+        *cursor;
+
+    line_end =
+        memchr(
+            line_begin,
+            '\n',
+            (size_t)(end - line_begin)
+        );
+
+    if (line_end == NULL)
+    {
+        line_end =
+            end;
+    }
+
+    (void)
+    rictus_intelligence_copy(
+        output,
+        output_size,
+        line_begin,
+        (size_t)(line_end - line_begin)
+    );
+
+    rictus_intelligence_trim(
+        output
+    );
+
+    *cursor =
+        line_end;
+
+    return 1;
+}
+
+
+static
+rictus_intelligence_parse_result_t
+rictus_intelligence_parse_nist_csrc(
+    const rictus_intelligence_source_definition_t *source,
+    const rictus_intelligence_response_t *response,
+    rictus_intelligence_item_set_t *items
+)
+{
+    char cleaned[
+        RICTUS_INTELLIGENCE_RESPONSE_MAX > 65536
+            ? 65536
+            : RICTUS_INTELLIGENCE_RESPONSE_MAX
+    ];
+
+    const char *cursor;
+    const char *end;
+    const char *results_begin;
+
+    char line[
+        RICTUS_INTELLIGENCE_ITEM_CONTENT_MAX
+    ];
+
+    char title[
+        RICTUS_INTELLIGENCE_ITEM_TITLE_MAX
+    ];
+
+    char date[
+        RICTUS_INTELLIGENCE_ITEM_DATE_MAX
+    ];
+
+    char description[
+        RICTUS_INTELLIGENCE_ITEM_SUMMARY_MAX
+    ];
+
+    int in_results =
+        0;
+
+
+    if (
+        source == NULL ||
+        response == NULL ||
+        items == NULL
+        )
+    {
+        return
+            RICTUS_INTELLIGENCE_PARSE_INVALID_ARGUMENT;
+    }
+
+
+    memset(
+        cleaned,
+        0,
+        sizeof(cleaned)
+    );
+
+
+    if (
+        !rictus_intelligence_html_extract_text(
+            response->body,
+            response->body_length,
+            cleaned,
+            sizeof(cleaned)
+        )
+        )
+    {
+        return
+            RICTUS_INTELLIGENCE_PARSE_INVALID_FORMAT;
+    }
+
+
+    results_begin =
+        strstr(
+            cleaned,
+            "Showing "
+        );
+
+
+    if (
+        results_begin == NULL
+        )
+    {
+        return
+            RICTUS_INTELLIGENCE_PARSE_INVALID_FORMAT;
+    }
+
+
+    cursor =
+        results_begin;
+
+
+    end =
+        cleaned +
+        strlen(cleaned);
+
+
+    while (
+        cursor < end
+        )
+    {
+        if (
+            !rictus_intelligence_next_line(
+                &cursor,
+                end,
+                line,
+                sizeof(line)
+            )
+            )
+        {
+            break;
+        }
+
+
+        if (
+            line[0] == '\0'
+            )
+        {
+            continue;
+        }
+
+
+        if (
+            !in_results
+            )
+        {
+            if (
+                strncmp(
+                    line,
+                    "Showing ",
+                    8
+                ) == 0
+                )
+            {
+                in_results =
+                    1;
+            }
+
+            continue;
+        }
+
+
+        /*
+         * Skip pagination-only lines.
+         */
+
+        if (
+            strchr(
+                line,
+                '|'
+            ) != NULL &&
+            strstr(
+                line,
+                " > "
+            ) != NULL
+            )
+        {
+            continue;
+        }
+
+
+        /*
+         * The next meaningful line is the title.
+         */
+
+        strcpy_s(
+            title,
+            sizeof(title),
+            line
+        );
+
+
+        if (
+            !rictus_intelligence_next_line(
+                &cursor,
+                end,
+                date,
+                sizeof(date)
+            )
+            )
+        {
+            break;
+        }
+
+
+        if (
+            !rictus_intelligence_month_name(
+                date
+            )
+            )
+        {
+            /*
+             * We have left the result sequence or
+             * encountered an unexpected page shape.
+             * Do not manufacture a record.
+             */
+
+            continue;
+        }
+
+
+        if (
+            !rictus_intelligence_next_line(
+                &cursor,
+                end,
+                description,
+                sizeof(description)
+            )
+            )
+        {
+            break;
+        }
+
+
+        if (
+            description[0] == '\0'
+            )
+        {
+            continue;
+        }
+
+
+        if (
+            items->count >=
+            RICTUS_INTELLIGENCE_ITEMS_MAX
+            )
+        {
+            return
+                RICTUS_INTELLIGENCE_PARSE_ITEM_LIMIT;
+        }
+
+
+        {
+            rictus_intelligence_item_t *item =
+                &items->items[
+                    items->count
+                ];
+
+            int written;
+
+
+            memset(
+                item,
+                0,
+                sizeof(*item)
+            );
+
+
+            (void)
+            rictus_intelligence_copy(
+                item->source,
+                sizeof(item->source),
+                source->name,
+                strlen(source->name)
+            );
+
+
+            (void)
+            rictus_intelligence_copy(
+                item->title,
+                sizeof(item->title),
+                title,
+                strlen(title)
+            );
+
+
+            (void)
+            rictus_intelligence_copy(
+                item->published,
+                sizeof(item->published),
+                date,
+                strlen(date)
+            );
+
+
+            (void)
+            rictus_intelligence_copy(
+                item->summary,
+                sizeof(item->summary),
+                description,
+                strlen(description)
+            );
+
+
+            written =
+                snprintf(
+                    item->url,
+                    sizeof(item->url),
+                    "https://%s%s",
+                    source->host,
+                    source->path
+                );
+
+
+            if (
+                written <= 0 ||
+                written >=
+                    (int)sizeof(item->url)
+                )
+            {
+                continue;
+            }
+
+
+            written =
+                snprintf(
+                    item->content,
+                    sizeof(item->content),
+                    "%s\n%s\n%s",
+                    item->title,
+                    item->published,
+                    item->summary
+                );
+
+
+            if (
+                written <= 0 ||
+                written >=
+                    (int)sizeof(item->content)
+                )
+            {
+                continue;
+            }
+
+
+            rictus_intelligence_item_fingerprint(
+                item
+            );
+
+
+            ++items->count;
+        }
+    }
+
+
+    if (
+        items->count == 0
+        )
+    {
+        return
+            RICTUS_INTELLIGENCE_PARSE_INVALID_FORMAT;
+    }
+
+
+    return
+        RICTUS_INTELLIGENCE_PARSE_OK;
+}
+
+
+/*
+ * ------------------------------------------------
  * SOURCE DOCUMENT
  * ------------------------------------------------
  *
  * Used for HTML sources until a source-specific
  * article parser is qualified.
  *
- * A deterministic fingerprint of the complete
- * response detects changes to the official source
- * document without pretending the HTML has already
- * been semantically understood.
+ * The retained evidence is normalized readable text.
+ * The deterministic fingerprint remains over the
+ * complete collected response so source changes are
+ * detected independently of presentation cleanup.
  */
 
 static
@@ -1063,6 +2047,20 @@ rictus_intelligence_parse_document(
         source->host,
         source->path
     );
+
+
+    if (
+        !rictus_intelligence_html_extract_text(
+            response->body,
+            response->body_length,
+            item->content,
+            sizeof(item->content)
+        )
+        )
+    {
+        return
+            RICTUS_INTELLIGENCE_PARSE_INVALID_FORMAT;
+    }
 
 
     hash =
@@ -1146,6 +2144,23 @@ rictus_intelligence_parse_response(
 
 
         case RICTUS_INTELLIGENCE_TRANSPORT_HTML:
+
+            if (
+                source->id != NULL &&
+                strcmp(
+                    source->id,
+                    "nist_csrc"
+                ) == 0
+                )
+            {
+                return
+                    rictus_intelligence_parse_nist_csrc(
+                        source,
+                        response,
+                        items
+                    );
+            }
+
 
             return
                 rictus_intelligence_parse_document(

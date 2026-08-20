@@ -4,7 +4,7 @@
  *
  * intelligence.c
  *
- * Intelligence module revision 0.8.0.
+ * Intelligence module revision 0.9.1.
  *
  * Responsibilities:
  *
@@ -29,6 +29,7 @@
 #include <windows.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "intelligence.h"
@@ -45,6 +46,12 @@
 
 #define RICTUS_INTELLIGENCE_IRC_MESSAGE_MAX \
     400
+
+#define RICTUS_INTELLIGENCE_CHAIN_INDEX_PATH \
+    "C:\\stn-labz\\policies\\policy.index.json"
+
+#define RICTUS_INTELLIGENCE_CHAIN_OUTPUT_MAX \
+    8192
 
 
 static HANDLE
@@ -613,6 +620,1142 @@ rictus_intelligence_command_srt(
         RICTUS_MODULE_OK;
 }
 
+
+/*
+ * ------------------------------------------------
+ * COMMAND: APPROVE
+ * ------------------------------------------------
+ *
+ * Human-controlled transition from a Pending
+ * INT-backed SRT candidate to an Approved SRT.
+ *
+ * Approval assigns the permanent SRT identity.
+ * It does not invoke chain or rag_builder.
+ */
+
+static const char *
+rictus_intelligence_reviewer_office(
+    const char *sender
+)
+{
+    if (
+        sender != NULL &&
+        _stricmp(sender, "STN_Boss") == 0
+        )
+    {
+        return "CEO / STN Boss";
+    }
+
+    return "UNRESOLVED";
+}
+
+
+static rictus_module_result_t
+rictus_intelligence_command_approve(
+    const rictus_module_command_t *command,
+    rictus_module_command_reply_fn reply,
+    void *reply_context,
+    void *handler_context
+)
+{
+    const rictus_intelligence_srt_request_t *existing;
+    const char *office;
+    char srt_id[RICTUS_INTELLIGENCE_SRT_ID_MAX];
+    char report_path[RICTUS_INTELLIGENCE_SRT_PATH_MAX];
+    char response[1200];
+
+    (void)handler_context;
+
+    if (
+        command == NULL ||
+        reply == NULL
+        )
+    {
+        return RICTUS_MODULE_ERR_INVALID_ARGUMENT;
+    }
+
+    if (
+        command->arguments[0] == '\0'
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "Usage: !approve INT-XXXXXXXX"
+            )
+            )
+        {
+            return RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return RICTUS_MODULE_OK;
+    }
+
+    existing =
+        rictus_intelligence_srt_store_find(
+            &g_intelligence_srt_requests,
+            command->arguments
+        );
+
+    if (existing == NULL)
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "%s: SRT CANDIDATE NOT FOUND",
+            command->arguments
+        );
+
+        if (!reply(reply_context, response))
+        {
+            return RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return RICTUS_MODULE_OK;
+    }
+
+    if (
+        _stricmp(existing->status, "APPROVED") == 0 &&
+        existing->srt_id[0] != '\0'
+        )
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "SRT ALREADY APPROVED | %s -> %s",
+            existing->intelligence_id,
+            existing->srt_id
+        );
+
+        if (!reply(reply_context, response))
+        {
+            return RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return RICTUS_MODULE_OK;
+    }
+
+    if (
+        _stricmp(existing->status, "REQUESTED") != 0
+        )
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "SRT APPROVAL REFUSED | %s | STATUS=%s",
+            existing->intelligence_id,
+            existing->status
+        );
+
+        if (!reply(reply_context, response))
+        {
+            return RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return RICTUS_MODULE_OK;
+    }
+
+    office =
+        rictus_intelligence_reviewer_office(
+            command->sender
+        );
+
+    if (
+        _stricmp(office, "UNRESOLVED") == 0
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "SRT APPROVAL REFUSED | REVIEWER OFFICE UNRESOLVED"
+            )
+            )
+        {
+            return RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return RICTUS_MODULE_OK;
+    }
+
+    memset(srt_id, 0, sizeof(srt_id));
+    memset(report_path, 0, sizeof(report_path));
+
+    if (
+        !rictus_intelligence_srt_approve(
+            &g_intelligence_srt_requests,
+            RICTUS_INTELLIGENCE_SRT_REQUEST_PATH,
+            RICTUS_INTELLIGENCE_SRT_DIRECTORY,
+            existing->intelligence_id,
+            command->sender,
+            office,
+            srt_id,
+            sizeof(srt_id),
+            report_path,
+            sizeof(report_path)
+        )
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "SRT APPROVAL FAILED"
+            )
+            )
+        {
+            return RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return RICTUS_MODULE_OK;
+    }
+
+    snprintf(
+        response,
+        sizeof(response),
+        "SRT APPROVED | %s -> %s",
+        command->arguments,
+        srt_id
+    );
+
+    if (!reply(reply_context, response))
+    {
+        return RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+    snprintf(
+        response,
+        sizeof(response),
+        "Report: %s",
+        report_path
+    );
+
+    if (!reply(reply_context, response))
+    {
+        return RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+    printf(
+        "[INTELLIGENCE] SRT approved "
+        "intelligence_id=%s srt_id=%s reviewer=%s office=%s report=%s\n",
+        command->arguments,
+        srt_id,
+        command->sender,
+        office,
+        report_path
+    );
+
+    return RICTUS_MODULE_OK;
+}
+
+
+
+/*
+ * ------------------------------------------------
+ * COMMAND: CHAIN
+ * ------------------------------------------------
+ *
+ * Human-controlled Trust Chain handoff.
+ *
+ * Preconditions:
+ * - argument is an SRT-* identifier
+ * - approved SRT report exists
+ * - report contains **Status:** Approved
+ *
+ * This command invokes Chain only. It does not
+ * invoke rag_builder and does not copy the report
+ * into the RAG input directory.
+ */
+
+static int
+rictus_intelligence_chain_read_status(
+    const char *report_path,
+    char *status,
+    size_t status_size
+)
+{
+    FILE *fp;
+    char line[512];
+
+    if (
+        report_path == NULL ||
+        status == NULL ||
+        status_size == 0
+        )
+    {
+        return 0;
+    }
+
+    status[0] = '\0';
+
+    if (
+        fopen_s(
+            &fp,
+            report_path,
+            "rb"
+        ) != 0 ||
+        fp == NULL
+        )
+    {
+        return 0;
+    }
+
+    while (
+        fgets(
+            line,
+            sizeof(line),
+            fp
+        ) != NULL
+        )
+    {
+        const char *prefix =
+            "**Status:**";
+
+        char *value;
+        char *end;
+
+        if (
+            strncmp(
+                line,
+                prefix,
+                strlen(prefix)
+            ) != 0
+            )
+        {
+            continue;
+        }
+
+        value =
+            line +
+            strlen(prefix);
+
+        while (
+            *value == ' ' ||
+            *value == '\t'
+            )
+        {
+            ++value;
+        }
+
+        end =
+            value +
+            strlen(value);
+
+        while (
+            end > value &&
+            (
+                end[-1] == '\r' ||
+                end[-1] == '\n' ||
+                end[-1] == ' ' ||
+                end[-1] == '\t'
+            )
+            )
+        {
+            --end;
+        }
+
+        *end =
+            '\0';
+
+        if (
+            value[0] == '\0' ||
+            strlen(value) >= status_size
+            )
+        {
+            fclose(fp);
+
+            return 0;
+        }
+
+        strcpy_s(
+            status,
+            status_size,
+            value
+        );
+
+        fclose(fp);
+
+        return 1;
+    }
+
+    fclose(fp);
+
+    return 0;
+}
+
+
+static int
+rictus_intelligence_chain_read_sha256(
+    const char *report_path,
+    char sha256[65]
+)
+{
+    FILE *fp;
+    char line[512];
+
+    if (
+        report_path == NULL ||
+        sha256 == NULL
+        )
+    {
+        return 0;
+    }
+
+    sha256[0] = '\0';
+
+    if (
+        fopen_s(
+            &fp,
+            report_path,
+            "rb"
+        ) != 0 ||
+        fp == NULL
+        )
+    {
+        return 0;
+    }
+
+    while (
+        fgets(
+            line,
+            sizeof(line),
+            fp
+        ) != NULL
+        )
+    {
+        const char *prefix =
+            "sha256:";
+
+        char *value;
+        size_t i;
+
+        if (
+            strncmp(
+                line,
+                prefix,
+                strlen(prefix)
+            ) != 0
+            )
+        {
+            continue;
+        }
+
+        value =
+            line +
+            strlen(prefix);
+
+        while (
+            *value == ' ' ||
+            *value == '\t'
+            )
+        {
+            ++value;
+        }
+
+        if (
+            strlen(value) < 64
+            )
+        {
+            fclose(fp);
+
+            return 0;
+        }
+
+        for (
+            i = 0;
+            i < 64;
+            ++i
+            )
+        {
+            char c =
+                value[i];
+
+            if (
+                !(
+                    (c >= '0' && c <= '9') ||
+                    (c >= 'a' && c <= 'f') ||
+                    (c >= 'A' && c <= 'F')
+                )
+                )
+            {
+                fclose(fp);
+
+                return 0;
+            }
+
+            sha256[i] =
+                c;
+        }
+
+        sha256[64] =
+            '\0';
+
+        fclose(fp);
+
+        return 1;
+    }
+
+    fclose(fp);
+
+    return 0;
+}
+
+
+static int
+rictus_intelligence_chain_execute(
+    const char *report_path,
+    char *output,
+    size_t output_size,
+    DWORD *exit_code
+)
+{
+    SECURITY_ATTRIBUTES security_attributes;
+    STARTUPINFOA startup_info;
+    PROCESS_INFORMATION process_info;
+
+    HANDLE read_pipe =
+        NULL;
+
+    HANDLE write_pipe =
+        NULL;
+
+    char command_line[
+        RICTUS_INTELLIGENCE_SRT_PATH_MAX +
+        1024
+    ];
+
+    DWORD bytes_read;
+    size_t used =
+        0;
+
+    int written;
+    BOOL process_created;
+
+    if (
+        report_path == NULL ||
+        output == NULL ||
+        output_size < 2 ||
+        exit_code == NULL
+        )
+    {
+        return 0;
+    }
+
+    output[0] =
+        '\0';
+
+    *exit_code =
+        (DWORD)-1;
+
+    memset(
+        &security_attributes,
+        0,
+        sizeof(security_attributes)
+    );
+
+    security_attributes.nLength =
+        sizeof(security_attributes);
+
+    security_attributes.bInheritHandle =
+        TRUE;
+
+    if (
+        !CreatePipe(
+            &read_pipe,
+            &write_pipe,
+            &security_attributes,
+            0
+        )
+        )
+    {
+        return 0;
+    }
+
+    if (
+        !SetHandleInformation(
+            read_pipe,
+            HANDLE_FLAG_INHERIT,
+            0
+        )
+        )
+    {
+        CloseHandle(read_pipe);
+        CloseHandle(write_pipe);
+
+        return 0;
+    }
+
+    written =
+        snprintf(
+            command_line,
+            sizeof(command_line),
+            "chain \"%s\" \"%s\"",
+            report_path,
+            RICTUS_INTELLIGENCE_CHAIN_INDEX_PATH
+        );
+
+    if (
+        written <= 0 ||
+        written >= (int)sizeof(command_line)
+        )
+    {
+        CloseHandle(read_pipe);
+        CloseHandle(write_pipe);
+
+        return 0;
+    }
+
+    memset(
+        &startup_info,
+        0,
+        sizeof(startup_info)
+    );
+
+    startup_info.cb =
+        sizeof(startup_info);
+
+    startup_info.dwFlags =
+        STARTF_USESTDHANDLES;
+
+    startup_info.hStdOutput =
+        write_pipe;
+
+    startup_info.hStdError =
+        write_pipe;
+
+    startup_info.hStdInput =
+        GetStdHandle(
+            STD_INPUT_HANDLE
+        );
+
+    memset(
+        &process_info,
+        0,
+        sizeof(process_info)
+    );
+
+    process_created =
+        CreateProcessA(
+            NULL,
+            command_line,
+            NULL,
+            NULL,
+            TRUE,
+            CREATE_NO_WINDOW,
+            NULL,
+            NULL,
+            &startup_info,
+            &process_info
+        );
+
+    CloseHandle(
+        write_pipe
+    );
+
+    write_pipe =
+        NULL;
+
+    if (
+        !process_created
+        )
+    {
+        CloseHandle(
+            read_pipe
+        );
+
+        return 0;
+    }
+
+    for (;;)
+    {
+        char buffer[512];
+
+        if (
+            !ReadFile(
+                read_pipe,
+                buffer,
+                sizeof(buffer),
+                &bytes_read,
+                NULL
+            ) ||
+            bytes_read == 0
+            )
+        {
+            break;
+        }
+
+        if (
+            used <
+            output_size - 1
+            )
+        {
+            size_t available =
+                output_size -
+                1 -
+                used;
+
+            size_t copy_size =
+                bytes_read;
+
+            if (
+                copy_size >
+                available
+                )
+            {
+                copy_size =
+                    available;
+            }
+
+            memcpy(
+                output + used,
+                buffer,
+                copy_size
+            );
+
+            used +=
+                copy_size;
+
+            output[used] =
+                '\0';
+        }
+    }
+
+    CloseHandle(
+        read_pipe
+    );
+
+    WaitForSingleObject(
+        process_info.hProcess,
+        INFINITE
+    );
+
+    if (
+        !GetExitCodeProcess(
+            process_info.hProcess,
+            exit_code
+        )
+        )
+    {
+        *exit_code =
+            (DWORD)-1;
+    }
+
+    CloseHandle(
+        process_info.hThread
+    );
+
+    CloseHandle(
+        process_info.hProcess
+    );
+
+    return 1;
+}
+
+
+static rictus_module_result_t
+rictus_intelligence_command_chain(
+    const rictus_module_command_t *command,
+    rictus_module_command_reply_fn reply,
+    void *reply_context,
+    void *handler_context
+)
+{
+    char report_path[
+        RICTUS_INTELLIGENCE_SRT_PATH_MAX
+    ];
+
+    char status[64];
+
+    char sha256[65];
+
+    char chain_output[
+        RICTUS_INTELLIGENCE_CHAIN_OUTPUT_MAX
+    ];
+
+    char response[1200];
+
+    DWORD exit_code;
+
+    int written;
+
+    (void)handler_context;
+
+    if (
+        command == NULL ||
+        reply == NULL
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_INVALID_ARGUMENT;
+    }
+
+    if (
+        command->arguments[0] == '\0'
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "Usage: !chain SRT-YYYYMMDD-NNN"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    if (
+        _strnicmp(
+            command->arguments,
+            "SRT-",
+            4
+        ) != 0 ||
+        strchr(
+            command->arguments,
+            '\\'
+        ) != NULL ||
+        strchr(
+            command->arguments,
+            '/'
+        ) != NULL ||
+        strstr(
+            command->arguments,
+            ".."
+        ) != NULL
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "CHAIN REFUSED | INVALID SRT ID"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    written =
+        snprintf(
+            report_path,
+            sizeof(report_path),
+            "%s\\%s.srt.md",
+            RICTUS_INTELLIGENCE_SRT_DIRECTORY,
+            command->arguments
+        );
+
+    if (
+        written <= 0 ||
+        written >= (int)sizeof(report_path)
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "CHAIN REFUSED | REPORT PATH INVALID"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    if (
+        GetFileAttributesA(
+            report_path
+        ) ==
+        INVALID_FILE_ATTRIBUTES
+        )
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "CHAIN REFUSED | %s | REPORT NOT FOUND",
+            command->arguments
+        );
+
+        if (
+            !reply(
+                reply_context,
+                response
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    if (
+        !rictus_intelligence_chain_read_status(
+            report_path,
+            status,
+            sizeof(status)
+        )
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "CHAIN REFUSED | STATUS MISSING OR INVALID"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    if (
+        _stricmp(
+            status,
+            "Approved"
+        ) != 0
+        )
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "CHAIN REFUSED | %s | STATUS=%s",
+            command->arguments,
+            status
+        );
+
+        if (
+            !reply(
+                reply_context,
+                response
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    printf(
+        "[INTELLIGENCE] Chain requested "
+        "srt_id=%s report=%s index=%s\n",
+        command->arguments,
+        report_path,
+        RICTUS_INTELLIGENCE_CHAIN_INDEX_PATH
+    );
+
+    if (
+        !rictus_intelligence_chain_execute(
+            report_path,
+            chain_output,
+            sizeof(chain_output),
+            &exit_code
+        )
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "CHAIN FAILED | PROCESS LAUNCH FAILED"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    if (
+        exit_code != 0 ||
+        strstr(
+            chain_output,
+            "CHAIN:         PASS"
+        ) == NULL
+        )
+    {
+        const char *reason =
+            "CHAIN REPORTED FAILURE";
+
+        if (
+            strstr(
+                chain_output,
+                "FAIL_"
+            ) != NULL
+            )
+        {
+            char *failure =
+                strstr(
+                    chain_output,
+                    "FAIL_"
+                );
+
+            char *end =
+                failure;
+
+            while (
+                *end != '\0' &&
+                *end != '\r' &&
+                *end != '\n'
+                )
+            {
+                ++end;
+            }
+
+            if (
+                (size_t)(end - failure) <
+                sizeof(response) - 64
+                )
+            {
+                char failure_text[512];
+                size_t failure_length =
+                    (size_t)(end - failure);
+
+                memcpy(
+                    failure_text,
+                    failure,
+                    failure_length
+                );
+
+                failure_text[failure_length] =
+                    '\0';
+
+                snprintf(
+                    response,
+                    sizeof(response),
+                    "CHAIN FAIL | %s | %s",
+                    command->arguments,
+                    failure_text
+                );
+
+                if (
+                    !reply(
+                        reply_context,
+                        response
+                    )
+                    )
+                {
+                    return
+                        RICTUS_MODULE_ERR_START_FAILED;
+                }
+
+                return
+                    RICTUS_MODULE_OK;
+            }
+        }
+
+        snprintf(
+            response,
+            sizeof(response),
+            "CHAIN FAIL | %s | %s | EXIT=%lu",
+            command->arguments,
+            reason,
+            (unsigned long)exit_code
+        );
+
+        if (
+            !reply(
+                reply_context,
+                response
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    if (
+        !rictus_intelligence_chain_read_sha256(
+            report_path,
+            sha256
+        )
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "CHAIN FAIL | PASS REPORTED BUT STAMPED sha256 NOT FOUND"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+    snprintf(
+        response,
+        sizeof(response),
+        "CHAIN PASS | %s",
+        command->arguments
+    );
+
+    if (
+        !reply(
+            reply_context,
+            response
+        )
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+    snprintf(
+        response,
+        sizeof(response),
+        "sha256: %s",
+        sha256
+    );
+
+    if (
+        !reply(
+            reply_context,
+            response
+        )
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+    printf(
+        "[INTELLIGENCE] Chain PASS "
+        "srt_id=%s sha256=%s\n",
+        command->arguments,
+        sha256
+    );
+
+    return
+        RICTUS_MODULE_OK;
+}
+
+
 /*
  * ------------------------------------------------
  * PUBLISH NEW SOURCE EVIDENCE
@@ -838,6 +1981,30 @@ rictus_intelligence_collect_cycle(void)
 
     size_t source_index;
 
+    rictus_intelligence_item_set_t
+        *items;
+
+
+    items =
+        (rictus_intelligence_item_set_t *)
+        malloc(
+            sizeof(*items)
+        );
+
+
+    if (
+        items == NULL
+        )
+    {
+        printf(
+            "[INTELLIGENCE] Collection cycle failed: "
+            "item-set allocation failed.\n"
+        );
+
+
+        return;
+    }
+
 
     source_count =
         rictus_intelligence_source_count();
@@ -867,9 +2034,6 @@ rictus_intelligence_collect_cycle(void)
         rictus_intelligence_collect_result_t
             collect_result;
 
-        rictus_intelligence_item_set_t
-            items;
-
         rictus_intelligence_parse_result_t
             parse_result;
 
@@ -883,6 +2047,11 @@ rictus_intelligence_collect_cycle(void)
             ) == WAIT_OBJECT_0
             )
         {
+            free(
+                items
+            );
+
+
             return;
         }
 
@@ -909,9 +2078,9 @@ rictus_intelligence_collect_cycle(void)
 
 
         memset(
-            &items,
+            items,
             0,
-            sizeof(items)
+            sizeof(*items)
         );
 
 
@@ -975,7 +2144,7 @@ rictus_intelligence_collect_cycle(void)
             rictus_intelligence_parse_response(
                 source,
                 &response,
-                &items
+                items
             );
 
 
@@ -1010,7 +2179,7 @@ rictus_intelligence_collect_cycle(void)
             "source=%s items=%u\n",
             source->name,
             (unsigned int)
-            items.count
+            items->count
         );
 
 
@@ -1027,7 +2196,7 @@ rictus_intelligence_collect_cycle(void)
 
         for (
             item_index = 0;
-            item_index < items.count;
+            item_index < items->count;
             ++item_index
             )
         {
@@ -1038,12 +2207,17 @@ rictus_intelligence_collect_cycle(void)
                 ) == WAIT_OBJECT_0
                 )
             {
+                free(
+                    items
+                );
+
+
                 return;
             }
 
 
             rictus_intelligence_process_item(
-                &items.items[
+                &items->items[
                     item_index
                 ]
             );
@@ -1053,6 +2227,11 @@ rictus_intelligence_collect_cycle(void)
 
     printf(
         "[INTELLIGENCE] Collection cycle complete.\n"
+    );
+
+
+    free(
+        items
     );
 }
 
@@ -1382,6 +2561,92 @@ rictus_intelligence_start(
     );
 
 
+    if (
+        !g_intelligence_host->register_command(
+            "approve",
+            rictus_intelligence_command_approve,
+            NULL
+        )
+        )
+    {
+        printf(
+            "[INTELLIGENCE] Command registration failed: approve\n"
+        );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "srt",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "show",
+                NULL
+            );
+
+        g_intelligence_host =
+            NULL;
+
+        return
+            RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+
+    printf(
+        "[INTELLIGENCE] Command registered: approve\n"
+    );
+
+
+    if (
+        !g_intelligence_host->register_command(
+            "chain",
+            rictus_intelligence_command_chain,
+            NULL
+        )
+        )
+    {
+        printf(
+            "[INTELLIGENCE] Command registration failed: chain\n"
+        );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "chain",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "approve",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "srt",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "show",
+                NULL
+            );
+
+        g_intelligence_host =
+            NULL;
+
+        return
+            RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+
+    printf(
+        "[INTELLIGENCE] Command registered: chain\n"
+    );
+
+
     stop_event =
         CreateEventA(
             NULL,
@@ -1395,6 +2660,18 @@ rictus_intelligence_start(
         stop_event == NULL
         )
     {
+        (void)
+            g_intelligence_host->unregister_command(
+                "chain",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "approve",
+                NULL
+            );
+
         (void)
             g_intelligence_host->unregister_command(
                 "srt",
@@ -1445,6 +2722,24 @@ rictus_intelligence_start(
         g_intelligence_stop_event =
             NULL;
 
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "chain",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "approve",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "srt",
+                NULL
+            );
 
         (void)
             g_intelligence_host->unregister_command(
@@ -1563,6 +2858,40 @@ rictus_intelligence_stop(void)
     if (
         g_intelligence_host == NULL ||
         g_intelligence_host->unregister_command == NULL ||
+        !g_intelligence_host->unregister_command(
+            "chain",
+            NULL
+        )
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_STOP_FAILED;
+    }
+
+
+    printf(
+        "[INTELLIGENCE] Command unregistered: chain\n"
+    );
+
+
+    if (
+        !g_intelligence_host->unregister_command(
+            "approve",
+            NULL
+        )
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_STOP_FAILED;
+    }
+
+
+    printf(
+        "[INTELLIGENCE] Command unregistered: approve\n"
+    );
+
+
+    if (
         !g_intelligence_host->unregister_command(
             "srt",
             NULL

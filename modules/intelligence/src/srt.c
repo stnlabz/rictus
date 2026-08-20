@@ -24,6 +24,7 @@
 #include <windows.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -485,6 +486,8 @@ rictus_intelligence_srt_store_load(
 
         char *status;
 
+        char *srt_id;
+
         rictus_intelligence_srt_request_t
             *request;
 
@@ -507,6 +510,14 @@ rictus_intelligence_srt_store_load(
 
 
         status =
+            strtok_s(
+                NULL,
+                "\t",
+                &context
+            );
+
+
+        srt_id =
             strtok_s(
                 NULL,
                 "\t",
@@ -574,7 +585,16 @@ rictus_intelligence_srt_store_load(
                 request->status,
                 sizeof(request->status),
                 status
-            ) != 0
+            ) != 0 ||
+            (
+                srt_id != NULL &&
+                srt_id[0] != '\0' &&
+                strcpy_s(
+                    request->srt_id,
+                    sizeof(request->srt_id),
+                    srt_id
+                ) != 0
+            )
             )
         {
             fclose(
@@ -669,7 +689,7 @@ rictus_intelligence_srt_store_append(
     if (
         fprintf(
             file,
-            "%s\t%s\n",
+            "%s\t%s\t\n",
             intelligence_id,
             status
         ) < 0 ||
@@ -737,6 +757,691 @@ rictus_intelligence_srt_store_append(
 }
 
 
+
+/*
+ * ------------------------------------------------
+ * STORE REWRITE
+ * ------------------------------------------------
+ */
+
+static int
+rictus_intelligence_srt_store_rewrite(
+    const rictus_intelligence_srt_store_t *store,
+    const char *path
+)
+{
+    FILE *file;
+    char temporary_path[RICTUS_INTELLIGENCE_SRT_PATH_MAX];
+    size_t index;
+    int written;
+
+    if (
+        store == NULL ||
+        path == NULL ||
+        path[0] == '\0'
+        )
+    {
+        return 0;
+    }
+
+    written =
+        snprintf(
+            temporary_path,
+            sizeof(temporary_path),
+            "%s.tmp",
+            path
+        );
+
+    if (
+        written <= 0 ||
+        written >= (int)sizeof(temporary_path)
+        )
+    {
+        return 0;
+    }
+
+    if (
+        fopen_s(
+            &file,
+            temporary_path,
+            "w"
+        ) != 0 ||
+        file == NULL
+        )
+    {
+        return 0;
+    }
+
+    for (
+        index = 0;
+        index < store->count;
+        ++index
+        )
+    {
+        const rictus_intelligence_srt_request_t *request =
+            &store->requests[index];
+
+        if (
+            fprintf(
+                file,
+                "%s\t%s\t%s\n",
+                request->intelligence_id,
+                request->status,
+                request->srt_id
+            ) < 0
+            )
+        {
+            fclose(file);
+            DeleteFileA(temporary_path);
+            return 0;
+        }
+    }
+
+    if (
+        fflush(file) != 0 ||
+        fclose(file) != 0
+        )
+    {
+        DeleteFileA(temporary_path);
+        return 0;
+    }
+
+    if (
+        !MoveFileExA(
+            temporary_path,
+            path,
+            MOVEFILE_REPLACE_EXISTING |
+            MOVEFILE_WRITE_THROUGH
+        )
+        )
+    {
+        DeleteFileA(temporary_path);
+        return 0;
+    }
+
+    return 1;
+}
+
+
+/*
+ * ------------------------------------------------
+ * SRT ID ALLOCATION
+ * ------------------------------------------------
+ */
+
+static int
+rictus_intelligence_srt_allocate_id(
+    const rictus_intelligence_srt_store_t *store,
+    char *srt_id,
+    size_t srt_id_size
+)
+{
+    SYSTEMTIME now;
+    char prefix[32];
+    unsigned int highest = 0;
+    size_t index;
+    int written;
+
+    if (
+        store == NULL ||
+        srt_id == NULL ||
+        srt_id_size == 0
+        )
+    {
+        return 0;
+    }
+
+    GetSystemTime(&now);
+
+    written =
+        snprintf(
+            prefix,
+            sizeof(prefix),
+            "SRT-%04u%02u%02u-",
+            (unsigned int)now.wYear,
+            (unsigned int)now.wMonth,
+            (unsigned int)now.wDay
+        );
+
+    if (
+        written <= 0 ||
+        written >= (int)sizeof(prefix)
+        )
+    {
+        return 0;
+    }
+
+    for (
+        index = 0;
+        index < store->count;
+        ++index
+        )
+    {
+        const char *existing =
+            store->requests[index].srt_id;
+
+        unsigned int sequence;
+
+        if (
+            existing[0] == '\0' ||
+            _strnicmp(
+                existing,
+                prefix,
+                strlen(prefix)
+            ) != 0
+            )
+        {
+            continue;
+        }
+
+        sequence =
+            (unsigned int)
+            strtoul(
+                existing + strlen(prefix),
+                NULL,
+                10
+            );
+
+        if (sequence > highest)
+        {
+            highest = sequence;
+        }
+    }
+
+    if (highest >= 999)
+    {
+        return 0;
+    }
+
+    written =
+        snprintf(
+            srt_id,
+            srt_id_size,
+            "%s%03u",
+            prefix,
+            highest + 1
+        );
+
+    return
+        written > 0 &&
+        written < (int)srt_id_size;
+}
+
+
+/*
+ * ------------------------------------------------
+ * APPROVAL DOCUMENT
+ * ------------------------------------------------
+ */
+
+static int
+rictus_intelligence_srt_write_approved_report(
+    const char *candidate_path,
+    const char *approved_path,
+    const char *intelligence_id,
+    const char *srt_id,
+    const char *reviewer,
+    const char *reviewer_office,
+    const char *review_date
+)
+{
+    FILE *input;
+    FILE *output;
+    char line[RICTUS_INTELLIGENCE_SRT_TEXT_MAX];
+
+    if (
+        candidate_path == NULL ||
+        approved_path == NULL ||
+        intelligence_id == NULL ||
+        srt_id == NULL ||
+        reviewer == NULL ||
+        reviewer_office == NULL ||
+        review_date == NULL
+        )
+    {
+        return 0;
+    }
+
+    if (
+        fopen_s(&input, candidate_path, "r") != 0 ||
+        input == NULL
+        )
+    {
+        return 0;
+    }
+
+    if (
+        fopen_s(&output, approved_path, "w") != 0 ||
+        output == NULL
+        )
+    {
+        fclose(input);
+        return 0;
+    }
+
+    while (
+        fgets(
+            line,
+            sizeof(line),
+            input
+        ) != NULL
+        )
+    {
+        if (
+            strncmp(
+                line,
+                "Root Document ID:",
+                strlen("Root Document ID:")
+            ) == 0
+            )
+        {
+            fprintf(
+                output,
+                "Root Document ID: %s\n",
+                srt_id
+            );
+        }
+        else if (
+            strncmp(
+                line,
+                "Revision ID:",
+                strlen("Revision ID:")
+            ) == 0
+            )
+        {
+            fputs(
+                "Revision ID: NONE\n",
+                output
+            );
+        }
+        else if (
+            strncmp(
+                line,
+                "**Status**: Pending",
+                strlen("**Status**: Pending")
+            ) == 0
+            )
+        {
+            fputs(
+                "**Status**: Approved\n",
+                output
+            );
+        }
+        else if (
+            strncmp(
+                line,
+                "Document ID:",
+                strlen("Document ID:")
+            ) == 0
+            )
+        {
+            fprintf(
+                output,
+                "Document ID: %s\n",
+                srt_id
+            );
+
+            fprintf(
+                output,
+                "Source Intelligence ID: %s\n",
+                intelligence_id
+            );
+        }
+        else if (
+            strncmp(
+                line,
+                "Document Type: Security Research Target Candidate",
+                strlen("Document Type: Security Research Target Candidate")
+            ) == 0
+            )
+        {
+            fputs(
+                "Document Type: Security Research Target\n",
+                output
+            );
+        }
+        else if (
+            strncmp(
+                line,
+                "Decision: PENDING",
+                strlen("Decision: PENDING")
+            ) == 0
+            )
+        {
+            fputs("Decision: Approved\n", output);
+        }
+        else if (
+            strncmp(
+                line,
+                "Reviewer: PENDING",
+                strlen("Reviewer: PENDING")
+            ) == 0
+            )
+        {
+            fprintf(output, "Reviewer: %s\n", reviewer);
+        }
+        else if (
+            strncmp(
+                line,
+                "Reviewer Office: PENDING",
+                strlen("Reviewer Office: PENDING")
+            ) == 0
+            )
+        {
+            fprintf(
+                output,
+                "Reviewer Office: %s\n",
+                reviewer_office
+            );
+        }
+        else if (
+            strncmp(
+                line,
+                "Review Date: PENDING",
+                strlen("Review Date: PENDING")
+            ) == 0
+            )
+        {
+            fprintf(
+                output,
+                "Review Date: %s\n",
+                review_date
+            );
+        }
+        else if (
+            strncmp(
+                line,
+                "Notes: PENDING",
+                strlen("Notes: PENDING")
+            ) == 0
+            )
+        {
+            fputs(
+                "Notes: Approved for Security Research Target registration.\n",
+                output
+            );
+        }
+        else
+        {
+            fputs(line, output);
+        }
+
+        if (ferror(output))
+        {
+            fclose(input);
+            fclose(output);
+            DeleteFileA(approved_path);
+            return 0;
+        }
+    }
+
+    fclose(input);
+
+    if (
+        fflush(output) != 0 ||
+        fclose(output) != 0
+        )
+    {
+        DeleteFileA(approved_path);
+        return 0;
+    }
+
+    return 1;
+}
+
+
+/*
+ * ------------------------------------------------
+ * APPROVE SRT CANDIDATE
+ * ------------------------------------------------
+ */
+
+int
+rictus_intelligence_srt_approve(
+    rictus_intelligence_srt_store_t *store,
+    const char *path,
+    const char *directory,
+    const char *intelligence_id,
+    const char *reviewer,
+    const char *reviewer_office,
+    char *srt_id,
+    size_t srt_id_size,
+    char *approved_report_path,
+    size_t approved_report_path_size
+)
+{
+    rictus_intelligence_srt_request_t *request;
+    char candidate_path[RICTUS_INTELLIGENCE_SRT_PATH_MAX];
+    char temporary_approved_path[RICTUS_INTELLIGENCE_SRT_PATH_MAX];
+    char review_date[64];
+    char allocated_id[RICTUS_INTELLIGENCE_SRT_ID_MAX];
+    char normalized_reviewer[RICTUS_INTELLIGENCE_SRT_TEXT_MAX];
+    char normalized_office[RICTUS_INTELLIGENCE_SRT_TEXT_MAX];
+    char previous_status[RICTUS_INTELLIGENCE_SRT_STATUS_MAX];
+    char previous_srt_id[RICTUS_INTELLIGENCE_SRT_ID_MAX];
+    int written;
+
+    if (
+        store == NULL ||
+        path == NULL ||
+        directory == NULL ||
+        intelligence_id == NULL ||
+        reviewer == NULL ||
+        reviewer_office == NULL ||
+        srt_id == NULL ||
+        srt_id_size == 0 ||
+        approved_report_path == NULL ||
+        approved_report_path_size == 0
+        )
+    {
+        return 0;
+    }
+
+    request =
+        (rictus_intelligence_srt_request_t *)
+        rictus_intelligence_srt_store_find(
+            store,
+            intelligence_id
+        );
+
+    if (
+        request == NULL ||
+        _stricmp(request->status, "REQUESTED") != 0 ||
+        request->srt_id[0] != '\0'
+        )
+    {
+        return 0;
+    }
+
+    if (
+        !rictus_intelligence_srt_allocate_id(
+            store,
+            allocated_id,
+            sizeof(allocated_id)
+        ) ||
+        !rictus_intelligence_srt_timestamp(
+            review_date,
+            sizeof(review_date)
+        )
+        )
+    {
+        return 0;
+    }
+
+    rictus_intelligence_srt_normalize_text(
+        reviewer,
+        normalized_reviewer,
+        sizeof(normalized_reviewer)
+    );
+
+    rictus_intelligence_srt_normalize_text(
+        reviewer_office,
+        normalized_office,
+        sizeof(normalized_office)
+    );
+
+    written =
+        snprintf(
+            candidate_path,
+            sizeof(candidate_path),
+            "%s\\%s.srt.md",
+            directory,
+            intelligence_id
+        );
+
+    if (
+        written <= 0 ||
+        written >= (int)sizeof(candidate_path)
+        )
+    {
+        return 0;
+    }
+
+    written =
+        snprintf(
+            temporary_approved_path,
+            sizeof(temporary_approved_path),
+            "%s\\%s.approved.tmp",
+            directory,
+            allocated_id
+        );
+
+    if (
+        written <= 0 ||
+        written >= (int)sizeof(temporary_approved_path)
+        )
+    {
+        return 0;
+    }
+
+    if (
+        !rictus_intelligence_srt_write_approved_report(
+            candidate_path,
+            temporary_approved_path,
+            intelligence_id,
+            allocated_id,
+            normalized_reviewer,
+            normalized_office,
+            review_date
+        )
+        )
+    {
+        return 0;
+    }
+
+    strcpy_s(
+        previous_status,
+        sizeof(previous_status),
+        request->status
+    );
+
+    strcpy_s(
+        previous_srt_id,
+        sizeof(previous_srt_id),
+        request->srt_id
+    );
+
+    if (
+        strcpy_s(
+            request->status,
+            sizeof(request->status),
+            "APPROVED"
+        ) != 0 ||
+        strcpy_s(
+            request->srt_id,
+            sizeof(request->srt_id),
+            allocated_id
+        ) != 0
+        )
+    {
+        DeleteFileA(temporary_approved_path);
+        return 0;
+    }
+
+    if (
+        !rictus_intelligence_srt_store_rewrite(
+            store,
+            path
+        )
+        )
+    {
+        strcpy_s(
+            request->status,
+            sizeof(request->status),
+            previous_status
+        );
+
+        strcpy_s(
+            request->srt_id,
+            sizeof(request->srt_id),
+            previous_srt_id
+        );
+
+        DeleteFileA(temporary_approved_path);
+        return 0;
+    }
+
+    written =
+        snprintf(
+            approved_report_path,
+            approved_report_path_size,
+            "%s\\%s.srt.md",
+            directory,
+            allocated_id
+        );
+
+    if (
+        written <= 0 ||
+        written >= (int)approved_report_path_size
+        )
+    {
+        return 0;
+    }
+
+    if (
+        !MoveFileExA(
+            temporary_approved_path,
+            approved_report_path,
+            MOVEFILE_WRITE_THROUGH
+        )
+        )
+    {
+        return 0;
+    }
+
+    /*
+     * Approval creates the SRT identity. The INT candidate
+     * is replaced by the approved SRT document; provenance
+     * inside the approved document retains the INT identity.
+     */
+
+    if (
+        !DeleteFileA(candidate_path)
+        )
+    {
+        /*
+         * The approved SRT and registry are already durable.
+         * Leaving the Pending candidate beside it would make
+         * state ambiguous, so report failure to the caller.
+         */
+        return 0;
+    }
+
+    if (
+        strcpy_s(
+            srt_id,
+            srt_id_size,
+            allocated_id
+        ) != 0
+        )
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+
 /*
  * ------------------------------------------------
  * REPORT GENERATION
@@ -780,6 +1485,10 @@ rictus_intelligence_srt_generate_report(
 
     char fingerprint[
         RICTUS_INTELLIGENCE_SRT_TEXT_MAX
+    ];
+
+    char content[
+        RICTUS_INTELLIGENCE_ITEM_CONTENT_MAX
     ];
 
     char requester[
@@ -886,6 +1595,24 @@ rictus_intelligence_srt_generate_report(
     );
 
 
+    if (record->item.content[0] != '\0')
+    {
+        strcpy_s(
+            content,
+            sizeof(content),
+            record->item.content
+        );
+    }
+    else
+    {
+        strcpy_s(
+            content,
+            sizeof(content),
+            "No source content was retained."
+        );
+    }
+
+
     rictus_intelligence_srt_normalize_text(
         requested_by,
         requester,
@@ -914,14 +1641,14 @@ rictus_intelligence_srt_generate_report(
             "Root Document ID: PENDING\n"
             "Revision ID: PENDING\n"
             "Previous Revision: NONE\n"
-            "sha256: PENDING\n"
-            "Status: Pending\n"
+            "sha256: <hash>\n"
+            "\n"
+            "**Status**: Pending\n"
             "\n"
             "## Record Identity\n"
             "\n"
-            "Source Intelligence ID: %s\n"
-            "SRT ID: PENDING\n"
-            "Document Type: Security Research Target\n"
+            "Document ID: %s\n"
+            "Document Type: Security Research Target Candidate\n"
             "Origin: Rictus Intelligence\n"
             "\n"
             "## Source Evidence\n"
@@ -933,6 +1660,10 @@ rictus_intelligence_srt_generate_report(
             "Intelligence Fingerprint: %s\n"
             "\n"
             "## Intelligence Context\n"
+            "\n"
+            "%s\n"
+            "\n"
+            "## Source Content\n"
             "\n"
             "%s\n"
             "\n"
@@ -958,6 +1689,7 @@ rictus_intelligence_srt_generate_report(
             "\n"
             "Decision: PENDING\n"
             "Reviewer: PENDING\n"
+            "Reviewer Office: PENDING\n"
             "Review Date: PENDING\n"
             "Notes: PENDING\n",
             record->id,
@@ -979,6 +1711,7 @@ rictus_intelligence_srt_generate_report(
             summary[0] != '\0'
                 ? summary
                 : "No source-derived summary was retained.",
+            content,
             requester,
             record->id,
             url[0] != '\0'

@@ -14,7 +14,7 @@
     0
 
 #define RICTUS_INTELLIGENCE_VERSION_MINOR \
-    8
+    9
 
 #define RICTUS_INTELLIGENCE_VERSION_PATCH \
     0

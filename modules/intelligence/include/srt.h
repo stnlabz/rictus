@@ -21,6 +21,12 @@
 #define RICTUS_INTELLIGENCE_SRT_REQUEST_PATH \
     "C:\\stn-labz\\reports\\SRT\\srt.requests"
 
+#define RICTUS_INTELLIGENCE_SRT_ID_MAX \
+    32
+
+#define RICTUS_INTELLIGENCE_SRT_OFFICE_MAX \
+    128
+
 
 typedef struct
 {
@@ -30,6 +36,10 @@ typedef struct
 
     char status[
         RICTUS_INTELLIGENCE_SRT_STATUS_MAX
+    ];
+
+    char srt_id[
+        RICTUS_INTELLIGENCE_SRT_ID_MAX
     ];
 
 } rictus_intelligence_srt_request_t;
@@ -72,6 +82,22 @@ rictus_intelligence_srt_store_append(
     const char *path,
     const char *intelligence_id,
     const char *status
+);
+
+
+
+int
+rictus_intelligence_srt_approve(
+    rictus_intelligence_srt_store_t *store,
+    const char *path,
+    const char *directory,
+    const char *intelligence_id,
+    const char *reviewer,
+    const char *reviewer_office,
+    char *srt_id,
+    size_t srt_id_size,
+    char *approved_report_path,
+    size_t approved_report_path_size
 );
 
 

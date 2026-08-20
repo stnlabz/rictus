@@ -3,7 +3,7 @@
 
 #include "record.h"
 
-#define RECORD_LINE_MAX 8192
+#define RECORD_LINE_MAX 65536
 
 static unsigned long
 record_hash_update(
@@ -235,7 +235,7 @@ rictus_intelligence_record_store_load(
     while (fgets(line, sizeof(line), file) != NULL)
     {
         char* context = NULL;
-        char* fields[7];
+        char* fields[8];
         char* token;
         size_t count = 0;
         rictus_intelligence_record_t* record;
@@ -244,13 +244,13 @@ rictus_intelligence_record_store_load(
 
         token = strtok_s(line, "\t", &context);
 
-        while (token != NULL && count < 7)
+        while (token != NULL && count < 8)
         {
             fields[count++] = token;
             token = strtok_s(NULL, "\t", &context);
         }
 
-        if (count != 7)
+        if (count != 7 && count != 8)
         {
             continue;
         }
@@ -270,7 +270,17 @@ rictus_intelligence_record_store_load(
         record_unescape(fields[3], record->item.url, sizeof(record->item.url));
         record_unescape(fields[4], record->item.published, sizeof(record->item.published));
         record_unescape(fields[5], record->item.summary, sizeof(record->item.summary));
-        record_unescape(fields[6], record->item.fingerprint, sizeof(record->item.fingerprint));
+
+        if (count == 8)
+        {
+            record_unescape(fields[6], record->item.content, sizeof(record->item.content));
+            record_unescape(fields[7], record->item.fingerprint, sizeof(record->item.fingerprint));
+        }
+        else
+        {
+            record->item.content[0] = '\0';
+            record_unescape(fields[6], record->item.fingerprint, sizeof(record->item.fingerprint));
+        }
 
         ++store->count;
     }
@@ -295,6 +305,7 @@ rictus_intelligence_record_store_append(
     char url[2048];
     char published[256];
     char summary[4096];
+    char content[RICTUS_INTELLIGENCE_ITEM_CONTENT_MAX * 2];
     char fingerprint[128];
     rictus_intelligence_record_t* record;
 
@@ -320,6 +331,7 @@ rictus_intelligence_record_store_append(
     record_escape(item->url, url, sizeof(url));
     record_escape(item->published, published, sizeof(published));
     record_escape(item->summary, summary, sizeof(summary));
+    record_escape(item->content, content, sizeof(content));
     record_escape(item->fingerprint, fingerprint, sizeof(fingerprint));
 
     if (fopen_s(&file, path, "a") != 0 || file == NULL)
@@ -330,13 +342,14 @@ rictus_intelligence_record_store_append(
     if (
         fprintf(
             file,
-            "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+            "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
             candidate,
             source,
             title,
             url,
             published,
             summary,
+            content,
             fingerprint
         ) < 0 ||
         fflush(file) != 0

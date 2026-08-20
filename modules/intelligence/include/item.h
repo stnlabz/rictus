@@ -19,6 +19,9 @@
 #define RICTUS_INTELLIGENCE_ITEM_SUMMARY_MAX \
     2048
 
+#define RICTUS_INTELLIGENCE_ITEM_CONTENT_MAX \
+    16384
+
 #define RICTUS_INTELLIGENCE_ITEM_FINGERPRINT_MAX \
     32
 
@@ -43,6 +46,10 @@ typedef struct
 
     char summary[
         RICTUS_INTELLIGENCE_ITEM_SUMMARY_MAX
+    ];
+
+    char content[
+        RICTUS_INTELLIGENCE_ITEM_CONTENT_MAX
     ];
 
     char fingerprint[
