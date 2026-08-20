@@ -1,0 +1,83 @@
+# -------------------------------------------------------------
+# Digit
+# STN-LABZ Engineering
+# -------------------------------------------------------------
+
+# Default text handling
+* text=auto eol=lf
+
+# -------------------------------------------------------------
+# Source
+# -------------------------------------------------------------
+
+*.c      text eol=lf
+*.h      text eol=lf
+
+# Additional STN-LABZ development languages
+*.php    text eol=lf
+*.go     text eol=lf
+*.rs     text eol=lf
+*.pl     text eol=lf
+
+# -------------------------------------------------------------
+# Scripts
+# -------------------------------------------------------------
+
+*.sh     text eol=lf
+
+# Windows command scripts require CRLF
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+# -------------------------------------------------------------
+# Structured data / configuration
+# -------------------------------------------------------------
+
+*.json   text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.toml   text eol=lf
+*.ini    text eol=lf
+*.conf   text eol=lf
+
+# -------------------------------------------------------------
+# Documentation
+# -------------------------------------------------------------
+
+*.md     text eol=lf
+*.txt    text eol=lf
+
+# -------------------------------------------------------------
+# Build files
+# -------------------------------------------------------------
+
+Makefile text eol=lf
+*.mk     text eol=lf
+*.cmake  text eol=lf
+
+# -------------------------------------------------------------
+# Binary assets
+# -------------------------------------------------------------
+
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+
+# Archives
+*.zip    binary
+*.tar    binary
+*.gz     binary
+*.tgz    binary
+*.7z     binary
+
+# Compiled / packaged binaries
+*.exe    binary
+*.dll    binary
+*.so     binary
+*.dylib  binary
+*.a      binary
+*.lib    binary
+*.obj    binary
+*.o      binary
