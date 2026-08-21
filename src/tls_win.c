@@ -8,6 +8,19 @@
 
 #define TLS_BUFFER_SIZE 16384
 
+
+/*
+ * ------------------------------------------------
+ * TLS INITIALIZATION
+ * ------------------------------------------------
+ *
+ * Initializes the rictus_tls object, creates its
+ * per-context transmit lock, and acquires the
+ * outbound Schannel credential handle.
+ *
+ * The transmit lock exists for the full lifetime
+ * of the TLS object and is released by tls_cleanup.
+ */
 int tls_init(
     rictus_tls* tls
 )
@@ -17,11 +30,31 @@ int tls_init(
 
     SCHANNEL_CRED credentials;
 
+    if (
+        tls == NULL
+        )
+    {
+        return 0;
+    }
+
     memset(
         tls,
         0,
         sizeof(*tls)
     );
+
+    /*
+     * Core and module workers may both transmit
+     * through this TLS context after connection
+     * establishment. Serialize those transmissions
+     * at the TLS boundary.
+     */
+    InitializeCriticalSection(
+        &tls->send_lock
+    );
+
+    tls->send_lock_initialized =
+        1;
 
     memset(
         &credentials,
@@ -35,25 +68,29 @@ int tls_init(
     /*
      * Strong cryptography.
      *
-     * Do not automatically select a client certificate.
+     * Do not automatically select a client
+     * certificate.
      */
     credentials.dwFlags =
         SCH_USE_STRONG_CRYPTO |
         SCH_CRED_NO_DEFAULT_CREDS;
 
-    status = AcquireCredentialsHandleA(
-        NULL,
-        UNISP_NAME_A,
-        SECPKG_CRED_OUTBOUND,
-        NULL,
-        &credentials,
-        NULL,
-        NULL,
-        &tls->credentials,
-        &expiry
-    );
+    status =
+        AcquireCredentialsHandleA(
+            NULL,
+            UNISP_NAME_A,
+            SECPKG_CRED_OUTBOUND,
+            NULL,
+            &credentials,
+            NULL,
+            NULL,
+            &tls->credentials,
+            &expiry
+        );
 
-    if (status != SEC_E_OK)
+    if (
+        status != SEC_E_OK
+        )
     {
         fprintf(
             stderr,
@@ -61,14 +98,34 @@ int tls_init(
             (unsigned long)status
         );
 
+        DeleteCriticalSection(
+            &tls->send_lock
+        );
+
+        tls->send_lock_initialized =
+            0;
+
         return 0;
     }
 
-    tls->credentials_valid = 1;
+    tls->credentials_valid =
+        1;
 
     return 1;
 }
 
+
+/*
+ * ------------------------------------------------
+ * TLS HANDSHAKE
+ * ------------------------------------------------
+ *
+ * Establishes the outbound Schannel security
+ * context on an already-connected socket.
+ *
+ * Handshake transmission occurs before normal
+ * module/Core application-data concurrency begins.
+ */
 int tls_handshake(
     rictus_tls* tls,
     SOCKET socket,
@@ -98,6 +155,16 @@ int tls_handshake(
 
     int input_len = 0;
     int first_call = 1;
+
+    if (
+        tls == NULL ||
+        !tls->credentials_valid ||
+        hostname == NULL ||
+        hostname[0] == '\0'
+        )
+    {
+        return 0;
+    }
 
     memset(
         &tls->context,
@@ -212,7 +279,9 @@ int tls_handshake(
                     &out_desc
                 );
 
-            if (complete_status != SEC_E_OK)
+            if (
+                complete_status != SEC_E_OK
+                )
             {
                 fprintf(
                     stderr,
@@ -220,7 +289,9 @@ int tls_handshake(
                     (unsigned long)complete_status
                 );
 
-                if (out_buffer.pvBuffer != NULL)
+                if (
+                    out_buffer.pvBuffer != NULL
+                    )
                 {
                     FreeContextBuffer(
                         out_buffer.pvBuffer
@@ -249,17 +320,20 @@ int tls_handshake(
             {
                 int sent;
 
-                sent = send(
-                    socket,
-                    (const char*)
-                    out_buffer.pvBuffer +
-                    total_sent,
-                    (int)out_buffer.cbBuffer -
-                    total_sent,
-                    0
-                );
+                sent =
+                    send(
+                        socket,
+                        (const char*)
+                        out_buffer.pvBuffer +
+                        total_sent,
+                        (int)out_buffer.cbBuffer -
+                        total_sent,
+                        0
+                    );
 
-                if (sent == SOCKET_ERROR)
+                if (
+                    sent == SOCKET_ERROR
+                    )
                 {
                     fprintf(
                         stderr,
@@ -274,7 +348,9 @@ int tls_handshake(
                     return 0;
                 }
 
-                if (sent == 0)
+                if (
+                    sent == 0
+                    )
                 {
                     fprintf(
                         stderr,
@@ -288,15 +364,19 @@ int tls_handshake(
                     return 0;
                 }
 
-                total_sent += sent;
+                total_sent +=
+                    sent;
             }
 
             FreeContextBuffer(
                 out_buffer.pvBuffer
             );
 
-            out_buffer.pvBuffer = NULL;
-            out_buffer.cbBuffer = 0;
+            out_buffer.pvBuffer =
+                NULL;
+
+            out_buffer.cbBuffer =
+                0;
         }
 
         /*
@@ -307,7 +387,8 @@ int tls_handshake(
             status == SEC_I_COMPLETE_NEEDED
             )
         {
-            tls->context_valid = 1;
+            tls->context_valid =
+                1;
 
             printf(
                 "TLS handshake established.\n"
@@ -380,14 +461,16 @@ int tls_handshake(
                 extra
             );
 
-            input_len = extra;
+            input_len =
+                extra;
         }
         else if (
             status !=
             SEC_E_INCOMPLETE_MESSAGE
             )
         {
-            input_len = 0;
+            input_len =
+                0;
         }
 
         if (
@@ -406,14 +489,18 @@ int tls_handshake(
         {
             int received;
 
-            received = recv(
-                socket,
-                input + input_len,
-                TLS_BUFFER_SIZE - input_len,
-                0
-            );
+            received =
+                recv(
+                    socket,
+                    input + input_len,
+                    TLS_BUFFER_SIZE -
+                    input_len,
+                    0
+                );
 
-            if (received == SOCKET_ERROR)
+            if (
+                received == SOCKET_ERROR
+                )
             {
                 fprintf(
                     stderr,
@@ -424,7 +511,9 @@ int tls_handshake(
                 return 0;
             }
 
-            if (received == 0)
+            if (
+                received == 0
+                )
             {
                 fprintf(
                     stderr,
@@ -434,12 +523,33 @@ int tls_handshake(
                 return 0;
             }
 
-            input_len += received;
+            input_len +=
+                received;
         }
     }
 }
 
-int tls_send(
+
+/*
+ * ------------------------------------------------
+ * TLS SEND - LOCKED IMPLEMENTATION
+ * ------------------------------------------------
+ *
+ * Performs exactly one TLS application-data
+ * transmission while the caller owns send_lock.
+ *
+ * The lock covers:
+ *
+ *   QueryContextAttributes
+ *       -> packet construction
+ *       -> EncryptMessage
+ *       -> every send() required for that record
+ *
+ * This prevents both concurrent Schannel encryption
+ * and interleaving of encrypted TLS record bytes.
+ */
+static int
+tls_send_locked(
     rictus_tls* tls,
     SOCKET socket,
     const char* data,
@@ -468,13 +578,16 @@ int tls_send(
         return 0;
     }
 
-    status = QueryContextAttributesA(
-        &tls->context,
-        SECPKG_ATTR_STREAM_SIZES,
-        &sizes
-    );
+    status =
+        QueryContextAttributesA(
+            &tls->context,
+            SECPKG_ATTR_STREAM_SIZES,
+            &sizes
+        );
 
-    if (status != SEC_E_OK)
+    if (
+        status != SEC_E_OK
+        )
     {
         fprintf(
             stderr,
@@ -508,7 +621,9 @@ int tls_send(
             packet_size
         );
 
-    if (packet == NULL)
+    if (
+        packet == NULL
+        )
     {
         fprintf(
             stderr,
@@ -543,7 +658,8 @@ int tls_send(
         SECBUFFER_DATA;
 
     buffers[1].pvBuffer =
-        packet + sizes.cbHeader;
+        packet +
+        sizes.cbHeader;
 
     buffers[1].cbBuffer =
         data_len;
@@ -552,7 +668,9 @@ int tls_send(
         SECBUFFER_STREAM_TRAILER;
 
     buffers[2].pvBuffer =
-        packet + sizes.cbHeader + data_len;
+        packet +
+        sizes.cbHeader +
+        data_len;
 
     buffers[2].cbBuffer =
         sizes.cbTrailer;
@@ -567,14 +685,17 @@ int tls_send(
     message.pBuffers =
         buffers;
 
-    status = EncryptMessage(
-        &tls->context,
-        0,
-        &message,
-        0
-    );
+    status =
+        EncryptMessage(
+            &tls->context,
+            0,
+            &message,
+            0
+        );
 
-    if (status != SEC_E_OK)
+    if (
+        status != SEC_E_OK
+        )
     {
         fprintf(
             stderr,
@@ -582,7 +703,9 @@ int tls_send(
             (unsigned long)status
         );
 
-        free(packet);
+        free(
+            packet
+        );
 
         return 0;
     }
@@ -592,7 +715,8 @@ int tls_send(
         (int)buffers[1].cbBuffer +
         (int)buffers[2].cbBuffer;
 
-    total_sent = 0;
+    total_sent =
+        0;
 
     while (
         total_sent <
@@ -601,16 +725,19 @@ int tls_send(
     {
         int sent;
 
-        sent = send(
-            socket,
-            (const char*)packet +
-            total_sent,
-            total_size -
-            total_sent,
-            0
-        );
+        sent =
+            send(
+                socket,
+                (const char*)packet +
+                total_sent,
+                total_size -
+                total_sent,
+                0
+            );
 
-        if (sent == SOCKET_ERROR)
+        if (
+            sent == SOCKET_ERROR
+            )
         {
             fprintf(
                 stderr,
@@ -618,33 +745,122 @@ int tls_send(
                 WSAGetLastError()
             );
 
-            free(packet);
+            free(
+                packet
+            );
 
             return 0;
         }
 
-        if (sent == 0)
+        if (
+            sent == 0
+            )
         {
             fprintf(
                 stderr,
                 "TLS send returned zero.\n"
             );
 
-            free(packet);
+            free(
+                packet
+            );
 
             return 0;
         }
 
-        total_sent += sent;
+        total_sent +=
+            sent;
     }
 
-    free(packet);
+    free(
+        packet
+    );
 
     return 1;
 }
 
+
 /*
- * TLS receive/decryption is the next root step.
+ * ------------------------------------------------
+ * TLS SEND
+ * ------------------------------------------------
+ *
+ * Public thread-safe application-data transmit
+ * boundary.
+ *
+ * Multiple callers may enter this function from
+ * Core or module worker threads. Exactly one caller
+ * at a time is allowed to encrypt/write a TLS
+ * record for this rictus_tls object.
+ *
+ * Receive/decrypt is not serialized by this lock.
+ */
+int tls_send(
+    rictus_tls* tls,
+    SOCKET socket,
+    const char* data,
+    int data_len
+)
+{
+    int result;
+
+    if (
+        tls == NULL ||
+        data == NULL ||
+        data_len <= 0 ||
+        !tls->send_lock_initialized
+        )
+    {
+        return 0;
+    }
+
+    EnterCriticalSection(
+        &tls->send_lock
+    );
+
+    /*
+     * Re-check context validity after acquiring the
+     * lock so no transmission proceeds against an
+     * invalid context.
+     */
+    if (
+        !tls->context_valid
+        )
+    {
+        LeaveCriticalSection(
+            &tls->send_lock
+        );
+
+        return 0;
+    }
+
+    result =
+        tls_send_locked(
+            tls,
+            socket,
+            data,
+            data_len
+        );
+
+    LeaveCriticalSection(
+        &tls->send_lock
+    );
+
+    return result;
+}
+
+
+/*
+ * ------------------------------------------------
+ * TLS RECEIVE
+ * ------------------------------------------------
+ *
+ * Receives and decrypts application data.
+ *
+ * Schannel permits one encrypting thread and one
+ * decrypting thread to use the same context
+ * concurrently. The send lock therefore does not
+ * serialize this receive path.
  */
 int tls_recv(
     rictus_tls* tls,
@@ -673,19 +889,24 @@ int tls_recv(
     for (;;)
     {
         /*
-         * If no encrypted data is currently buffered,
-         * receive some from the socket.
+         * If no encrypted data is currently
+         * buffered, receive some from the socket.
          */
-        if (tls->recv_buffer_len == 0)
+        if (
+            tls->recv_buffer_len == 0
+            )
         {
-            received = recv(
-                socket,
-                (char*)tls->recv_buffer,
-                RICTUS_TLS_RECV_BUFFER,
-                0
-            );
+            received =
+                recv(
+                    socket,
+                    (char*)tls->recv_buffer,
+                    RICTUS_TLS_RECV_BUFFER,
+                    0
+                );
 
-            if (received == SOCKET_ERROR)
+            if (
+                received == SOCKET_ERROR
+                )
             {
                 fprintf(
                     stderr,
@@ -696,7 +917,9 @@ int tls_recv(
                 return -1;
             }
 
-            if (received == 0)
+            if (
+                received == 0
+                )
             {
                 return 0;
             }
@@ -736,12 +959,13 @@ int tls_recv(
         message.pBuffers =
             buffers;
 
-        status = DecryptMessage(
-            &tls->context,
-            &message,
-            0,
-            NULL
-        );
+        status =
+            DecryptMessage(
+                &tls->context,
+                &message,
+                0,
+                NULL
+            );
 
         /*
          * We do not yet have an entire TLS record.
@@ -765,16 +989,19 @@ int tls_recv(
                 return -1;
             }
 
-            received = recv(
-                socket,
-                (char*)tls->recv_buffer +
-                tls->recv_buffer_len,
-                RICTUS_TLS_RECV_BUFFER -
-                tls->recv_buffer_len,
-                0
-            );
+            received =
+                recv(
+                    socket,
+                    (char*)tls->recv_buffer +
+                    tls->recv_buffer_len,
+                    RICTUS_TLS_RECV_BUFFER -
+                    tls->recv_buffer_len,
+                    0
+                );
 
-            if (received == SOCKET_ERROR)
+            if (
+                received == SOCKET_ERROR
+                )
             {
                 fprintf(
                     stderr,
@@ -785,7 +1012,9 @@ int tls_recv(
                 return -1;
             }
 
-            if (received == 0)
+            if (
+                received == 0
+                )
             {
                 return 0;
             }
@@ -804,7 +1033,9 @@ int tls_recv(
             return 0;
         }
 
-        if (status != SEC_E_OK)
+        if (
+            status != SEC_E_OK
+            )
         {
             fprintf(
                 stderr,
@@ -821,13 +1052,20 @@ int tls_recv(
          * record.
          */
         {
-            SecBuffer* data_buffer = NULL;
-            SecBuffer* extra_buffer = NULL;
+            SecBuffer* data_buffer =
+                NULL;
+
+            SecBuffer* extra_buffer =
+                NULL;
 
             int i;
             int copy_len;
 
-            for (i = 0; i < 4; ++i)
+            for (
+                i = 0;
+                i < 4;
+                ++i
+                )
             {
                 if (
                     buffers[i].BufferType ==
@@ -847,7 +1085,9 @@ int tls_recv(
                 }
             }
 
-            if (data_buffer != NULL)
+            if (
+                data_buffer != NULL
+                )
             {
                 copy_len =
                     (int)data_buffer->cbBuffer;
@@ -876,14 +1116,17 @@ int tls_recv(
             }
             else
             {
-                copy_len = 0;
+                copy_len =
+                    0;
             }
 
             /*
              * Preserve another encrypted TLS record
              * if Schannel says one follows.
              */
-            if (extra_buffer != NULL)
+            if (
+                extra_buffer != NULL
+                )
             {
                 int extra_len =
                     (int)extra_buffer->cbBuffer;
@@ -903,38 +1146,74 @@ int tls_recv(
                     0;
             }
 
-            if (copy_len > 0)
+            if (
+                copy_len > 0
+                )
             {
-                return copy_len;
+                return
+                    copy_len;
             }
         }
     }
 }
 
+
+/*
+ * ------------------------------------------------
+ * TLS CLEANUP
+ * ------------------------------------------------
+ *
+ * Releases Schannel state and the per-context send
+ * lock.
+ *
+ * Core must stop module workers before calling this
+ * function. Cleanup is therefore not designed to
+ * race a live tls_send/tls_recv caller.
+ */
 void tls_cleanup(
     rictus_tls* tls
 )
 {
-    if (tls == NULL)
+    if (
+        tls == NULL
+        )
     {
         return;
     }
 
-    if (tls->context_valid)
+    if (
+        tls->context_valid
+        )
     {
         DeleteSecurityContext(
             &tls->context
         );
 
-        tls->context_valid = 0;
+        tls->context_valid =
+            0;
     }
 
-    if (tls->credentials_valid)
+    if (
+        tls->credentials_valid
+        )
     {
         FreeCredentialsHandle(
             &tls->credentials
         );
 
-        tls->credentials_valid = 0;
+        tls->credentials_valid =
+            0;
+    }
+
+    if (
+        tls->send_lock_initialized
+        )
+    {
+        DeleteCriticalSection(
+            &tls->send_lock
+        );
+
+        tls->send_lock_initialized =
+            0;
     }
 }

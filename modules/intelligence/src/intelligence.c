@@ -53,6 +53,12 @@
 #define RICTUS_INTELLIGENCE_CHAIN_OUTPUT_MAX \
     8192
 
+#define RICTUS_INTELLIGENCE_RAG_INPUT_DIRECTORY \
+    "C:\\stn-labz\\rag\\input"
+
+#define RICTUS_INTELLIGENCE_RAG_LINE_MAX \
+    512
+
 
 static HANDLE
 g_intelligence_thread =
@@ -93,7 +99,6 @@ g_intelligence_srt_requests;
  * Core guarantees that it remains valid while
  * the module is ACTIVE.
  */
-
 static const rictus_module_host_t*
 g_intelligence_host =
 NULL;
@@ -242,11 +247,18 @@ rictus_intelligence_source_class_string(
  * COMMAND: SHOW
  * ------------------------------------------------
  *
- * This revision proves Core-to-module command
- * dispatch. Persistent INT record lookup is added
- * in the next Intelligence revision.
+ * Resolves one persistent INT record and returns
+ * its primary operator-facing fields.
+ *
+ * Parameters:
+ * - command:       Parsed Core-owned command.
+ * - reply:         Core-owned reply callback.
+ * - reply_context: Core-owned callback context.
+ * - handler_context: Unused for this command.
+ *
+ * Returns a module result describing command
+ * handling success or callback failure.
  */
-
 static rictus_module_result_t
 rictus_intelligence_command_show(
     const rictus_module_command_t* command,
@@ -345,6 +357,7 @@ rictus_intelligence_command_show(
     return RICTUS_MODULE_OK;
 }
 
+
 /*
  * ------------------------------------------------
  * COMMAND: SRT
@@ -357,7 +370,6 @@ rictus_intelligence_command_show(
  * until the Security Research workflow accepts
  * and identifies the research target.
  */
-
 static rictus_module_result_t
 rictus_intelligence_command_srt(
     const rictus_module_command_t* command,
@@ -847,7 +859,6 @@ rictus_intelligence_command_approve(
 }
 
 
-
 /*
  * ------------------------------------------------
  * COMMAND: CHAIN
@@ -1099,6 +1110,12 @@ rictus_intelligence_chain_read_sha256(
 }
 
 
+/*
+ * Launches the system-installed Chain utility,
+ * captures stdout/stderr into a caller buffer,
+ * waits for process termination, and returns the
+ * child exit code through exit_code.
+ */
 static int
 rictus_intelligence_chain_execute(
     const char *report_path,
@@ -1758,6 +1775,889 @@ rictus_intelligence_command_chain(
 
 /*
  * ------------------------------------------------
+ * RAG OUTPUT RELAY
+ * ------------------------------------------------
+ *
+ * Relays one completed rag_builder stdout/stderr
+ * line through the existing command reply path.
+ *
+ * Empty lines are ignored.
+ */
+static int
+rictus_intelligence_rag_reply_line(
+    rictus_module_command_reply_fn reply,
+    void *reply_context,
+    const char *line
+)
+{
+    char response[
+        RICTUS_INTELLIGENCE_IRC_MESSAGE_MAX
+    ];
+
+    int written;
+
+
+    if (
+        reply == NULL ||
+        line == NULL
+        )
+    {
+        return 0;
+    }
+
+
+    if (
+        line[0] == '\0'
+        )
+    {
+        return 1;
+    }
+
+
+    written =
+        snprintf(
+            response,
+            sizeof(response),
+            "[RAG] %s",
+            line
+        );
+
+
+    if (
+        written <= 0 ||
+        written >= (int)sizeof(response)
+        )
+    {
+        return 0;
+    }
+
+
+    return
+        reply(
+            reply_context,
+            response
+        );
+}
+
+
+/*
+ * ------------------------------------------------
+ * RAG BUILDER EXECUTION
+ * ------------------------------------------------
+ *
+ * Launches the system-installed rag_builder command
+ * with no command-line arguments.
+ *
+ * rag_builder remains responsible for its own
+ * preconfigured C:\stn-labz\rag input/output paths.
+ *
+ * stdout and stderr are redirected into one pipe
+ * and relayed to the operator line-by-line while
+ * rag_builder is running.
+ *
+ * exit_code receives the child process exit code.
+ */
+static int
+rictus_intelligence_rag_execute(
+    rictus_module_command_reply_fn reply,
+    void *reply_context,
+    DWORD *exit_code
+)
+{
+    SECURITY_ATTRIBUTES
+        security_attributes;
+
+    STARTUPINFOA
+        startup_info;
+
+    PROCESS_INFORMATION
+        process_info;
+
+    HANDLE read_pipe =
+        NULL;
+
+    HANDLE write_pipe =
+        NULL;
+
+    char command_line[] =
+        "rag_builder";
+
+    char line[
+        RICTUS_INTELLIGENCE_RAG_LINE_MAX
+    ];
+
+    size_t line_length =
+        0;
+
+    BOOL process_created;
+
+    DWORD bytes_read;
+
+
+    if (
+        reply == NULL ||
+        exit_code == NULL
+        )
+    {
+        return 0;
+    }
+
+
+    *exit_code =
+        (DWORD)-1;
+
+
+    memset(
+        &security_attributes,
+        0,
+        sizeof(security_attributes)
+    );
+
+
+    security_attributes.nLength =
+        sizeof(security_attributes);
+
+    security_attributes.bInheritHandle =
+        TRUE;
+
+
+    if (
+        !CreatePipe(
+            &read_pipe,
+            &write_pipe,
+            &security_attributes,
+            0
+        )
+        )
+    {
+        return 0;
+    }
+
+
+    if (
+        !SetHandleInformation(
+            read_pipe,
+            HANDLE_FLAG_INHERIT,
+            0
+        )
+        )
+    {
+        CloseHandle(
+            read_pipe
+        );
+
+        CloseHandle(
+            write_pipe
+        );
+
+        return 0;
+    }
+
+
+    memset(
+        &startup_info,
+        0,
+        sizeof(startup_info)
+    );
+
+
+    startup_info.cb =
+        sizeof(startup_info);
+
+    startup_info.dwFlags =
+        STARTF_USESTDHANDLES;
+
+    startup_info.hStdOutput =
+        write_pipe;
+
+    startup_info.hStdError =
+        write_pipe;
+
+    startup_info.hStdInput =
+        GetStdHandle(
+            STD_INPUT_HANDLE
+        );
+
+
+    memset(
+        &process_info,
+        0,
+        sizeof(process_info)
+    );
+
+
+    process_created =
+        CreateProcessA(
+            NULL,
+            command_line,
+            NULL,
+            NULL,
+            TRUE,
+            CREATE_NO_WINDOW,
+            NULL,
+            NULL,
+            &startup_info,
+            &process_info
+        );
+
+
+    CloseHandle(
+        write_pipe
+    );
+
+    write_pipe =
+        NULL;
+
+
+    if (
+        !process_created
+        )
+    {
+        CloseHandle(
+            read_pipe
+        );
+
+        return 0;
+    }
+
+
+    for (;;)
+    {
+        char buffer[256];
+        DWORD index;
+
+
+        if (
+            !ReadFile(
+                read_pipe,
+                buffer,
+                sizeof(buffer),
+                &bytes_read,
+                NULL
+            ) ||
+            bytes_read == 0
+            )
+        {
+            break;
+        }
+
+
+        for (
+            index = 0;
+            index < bytes_read;
+            ++index
+            )
+        {
+            char c =
+                buffer[index];
+
+
+            if (
+                c == '\r'
+                )
+            {
+                continue;
+            }
+
+
+            if (
+                c == '\n'
+                )
+            {
+                line[
+                    line_length
+                ] =
+                    '\0';
+
+
+                if (
+                    !rictus_intelligence_rag_reply_line(
+                        reply,
+                        reply_context,
+                        line
+                    )
+                    )
+                {
+                    CloseHandle(
+                        read_pipe
+                    );
+
+                    TerminateProcess(
+                        process_info.hProcess,
+                        1
+                    );
+
+                    WaitForSingleObject(
+                        process_info.hProcess,
+                        INFINITE
+                    );
+
+                    CloseHandle(
+                        process_info.hThread
+                    );
+
+                    CloseHandle(
+                        process_info.hProcess
+                    );
+
+                    return 0;
+                }
+
+
+                line_length =
+                    0;
+
+                continue;
+            }
+
+
+            if (
+                line_length >=
+                sizeof(line) - 1
+                )
+            {
+                line[
+                    line_length
+                ] =
+                    '\0';
+
+
+                if (
+                    !rictus_intelligence_rag_reply_line(
+                        reply,
+                        reply_context,
+                        line
+                    )
+                    )
+                {
+                    CloseHandle(
+                        read_pipe
+                    );
+
+                    TerminateProcess(
+                        process_info.hProcess,
+                        1
+                    );
+
+                    WaitForSingleObject(
+                        process_info.hProcess,
+                        INFINITE
+                    );
+
+                    CloseHandle(
+                        process_info.hThread
+                    );
+
+                    CloseHandle(
+                        process_info.hProcess
+                    );
+
+                    return 0;
+                }
+
+
+                line_length =
+                    0;
+            }
+
+
+            line[
+                line_length++
+            ] =
+                c;
+        }
+    }
+
+
+    CloseHandle(
+        read_pipe
+    );
+
+
+    if (
+        line_length > 0
+        )
+    {
+        line[
+            line_length
+        ] =
+            '\0';
+
+
+        if (
+            !rictus_intelligence_rag_reply_line(
+                reply,
+                reply_context,
+                line
+            )
+            )
+        {
+            TerminateProcess(
+                process_info.hProcess,
+                1
+            );
+
+            WaitForSingleObject(
+                process_info.hProcess,
+                INFINITE
+            );
+
+            CloseHandle(
+                process_info.hThread
+            );
+
+            CloseHandle(
+                process_info.hProcess
+            );
+
+            return 0;
+        }
+    }
+
+
+    WaitForSingleObject(
+        process_info.hProcess,
+        INFINITE
+    );
+
+
+    if (
+        !GetExitCodeProcess(
+            process_info.hProcess,
+            exit_code
+        )
+        )
+    {
+        *exit_code =
+            (DWORD)-1;
+    }
+
+
+    CloseHandle(
+        process_info.hThread
+    );
+
+    CloseHandle(
+        process_info.hProcess
+    );
+
+
+    return 1;
+}
+
+
+/*
+ * ------------------------------------------------
+ * COMMAND: RAG
+ * ------------------------------------------------
+ *
+ * Operator-directed rag_builder handoff.
+ *
+ * Operation:
+ * - accepts one SRT identifier;
+ * - resolves the approved SRT Markdown report;
+ * - copies it to C:\stn-labz\rag\input;
+ * - invokes the system-installed rag_builder;
+ * - relays rag_builder stdout/stderr in real time;
+ * - reports PASS or FAIL from the process exit code.
+ *
+ * This command does not invoke Chain, change
+ * rag_builder configuration, or copy corpus output
+ * into Digit's corpus directory.
+ */
+static rictus_module_result_t
+rictus_intelligence_command_rag(
+    const rictus_module_command_t *command,
+    rictus_module_command_reply_fn reply,
+    void *reply_context,
+    void *handler_context
+)
+{
+    char source_path[
+        RICTUS_INTELLIGENCE_SRT_PATH_MAX
+    ];
+
+    char destination_path[
+        RICTUS_INTELLIGENCE_SRT_PATH_MAX
+    ];
+
+    char response[
+        1200
+    ];
+
+    DWORD attributes;
+    DWORD exit_code;
+    int written;
+
+
+    (void)handler_context;
+
+
+    if (
+        command == NULL ||
+        reply == NULL
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_INVALID_ARGUMENT;
+    }
+
+
+    if (
+        command->arguments[0] == '\0'
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "Usage: !rag SRT-YYYYMMDD-NNN"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    if (
+        _strnicmp(
+            command->arguments,
+            "SRT-",
+            4
+        ) != 0 ||
+        strchr(
+            command->arguments,
+            '\\'
+        ) != NULL ||
+        strchr(
+            command->arguments,
+            '/'
+        ) != NULL ||
+        strstr(
+            command->arguments,
+            ".."
+        ) != NULL
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "RAG REFUSED | INVALID SRT ID"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    written =
+        snprintf(
+            source_path,
+            sizeof(source_path),
+            "%s\\%s.srt.md",
+            RICTUS_INTELLIGENCE_SRT_DIRECTORY,
+            command->arguments
+        );
+
+
+    if (
+        written <= 0 ||
+        written >= (int)sizeof(source_path)
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "RAG REFUSED | SOURCE PATH INVALID"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    attributes =
+        GetFileAttributesA(
+            source_path
+        );
+
+
+    if (
+        attributes ==
+            INVALID_FILE_ATTRIBUTES ||
+        (
+            attributes &
+            FILE_ATTRIBUTE_DIRECTORY
+        ) != 0
+        )
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "RAG REFUSED | %s | SRT NOT FOUND",
+            command->arguments
+        );
+
+
+        if (
+            !reply(
+                reply_context,
+                response
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    attributes =
+        GetFileAttributesA(
+            RICTUS_INTELLIGENCE_RAG_INPUT_DIRECTORY
+        );
+
+
+    if (
+        attributes ==
+            INVALID_FILE_ATTRIBUTES ||
+        (
+            attributes &
+            FILE_ATTRIBUTE_DIRECTORY
+        ) == 0
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "RAG FAILED | INPUT DIRECTORY NOT FOUND"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    written =
+        snprintf(
+            destination_path,
+            sizeof(destination_path),
+            "%s\\%s.srt.md",
+            RICTUS_INTELLIGENCE_RAG_INPUT_DIRECTORY,
+            command->arguments
+        );
+
+
+    if (
+        written <= 0 ||
+        written >=
+            (int)sizeof(destination_path)
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "RAG FAILED | DESTINATION PATH INVALID"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    if (
+        !CopyFileA(
+            source_path,
+            destination_path,
+            FALSE
+        )
+        )
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "RAG FAILED | %s | COPY FAILED | WIN32=%lu",
+            command->arguments,
+            (unsigned long)GetLastError()
+        );
+
+
+        if (
+            !reply(
+                reply_context,
+                response
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    snprintf(
+        response,
+        sizeof(response),
+        "RAG STAGED | %s",
+        command->arguments
+    );
+
+
+    if (
+        !reply(
+            reply_context,
+            response
+        )
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+
+    printf(
+        "[INTELLIGENCE] RAG requested "
+        "srt_id=%s source=%s destination=%s\n",
+        command->arguments,
+        source_path,
+        destination_path
+    );
+
+
+    if (
+        !rictus_intelligence_rag_execute(
+            reply,
+            reply_context,
+            &exit_code
+        )
+        )
+    {
+        if (
+            !reply(
+                reply_context,
+                "RAG FAILED | PROCESS EXECUTION FAILED"
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    if (
+        exit_code != 0
+        )
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "RAG FAIL | %s | EXIT=%lu",
+            command->arguments,
+            (unsigned long)exit_code
+        );
+
+
+        if (
+            !reply(
+                reply_context,
+                response
+            )
+            )
+        {
+            return
+                RICTUS_MODULE_ERR_START_FAILED;
+        }
+
+
+        printf(
+            "[INTELLIGENCE] RAG FAIL "
+            "srt_id=%s exit=%lu\n",
+            command->arguments,
+            (unsigned long)exit_code
+        );
+
+
+        return
+            RICTUS_MODULE_OK;
+    }
+
+
+    snprintf(
+        response,
+        sizeof(response),
+        "RAG PASS | %s",
+        command->arguments
+    );
+
+
+    if (
+        !reply(
+            reply_context,
+            response
+        )
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+
+    printf(
+        "[INTELLIGENCE] RAG PASS "
+        "srt_id=%s\n",
+        command->arguments
+    );
+
+
+    return
+        RICTUS_MODULE_OK;
+}
+
+
+/*
+ * ------------------------------------------------
  * PUBLISH NEW SOURCE EVIDENCE
  * ------------------------------------------------
  */
@@ -1838,6 +2738,7 @@ rictus_intelligence_publish_item(
     );
 }
 
+
 /*
  * ------------------------------------------------
  * PROCESS NORMALIZED ITEM
@@ -1880,13 +2781,6 @@ rictus_intelligence_process_item(
     }
 
 
-    /*
-     * New source evidence.
-     *
-     * This is not yet an approved intelligence
-     * briefing. It is a normalized new input.
-     */
-
     printf(
         "[INTELLIGENCE] NEW ITEM "
         "source=%s "
@@ -1924,13 +2818,6 @@ rictus_intelligence_process_item(
     }
 
 
-    /*
-     * Persist first.
-     *
-     * If persistence fails, the item is not treated
-     * as successfully accepted and is not published.
-     */
-
     seen_result =
         rictus_intelligence_seen_add(
             &g_intelligence_seen,
@@ -1956,11 +2843,6 @@ rictus_intelligence_process_item(
         return;
     }
 
-
-    /*
-     * Publication occurs only after successful
-     * persistent deduplication state update.
-     */
 
     rictus_intelligence_publish_item(
         item
@@ -2134,12 +3016,6 @@ rictus_intelligence_collect_cycle(void)
         );
 
 
-        /*
-         * ------------------------------------------------
-         * NORMALIZATION
-         * ------------------------------------------------
-         */
-
         parse_result =
             rictus_intelligence_parse_response(
                 source,
@@ -2187,12 +3063,6 @@ rictus_intelligence_collect_cycle(void)
             &response
         );
 
-
-        /*
-         * ------------------------------------------------
-         * DEDUPLICATION / PUBLICATION
-         * ------------------------------------------------
-         */
 
         for (
             item_index = 0;
@@ -2334,11 +3204,6 @@ rictus_intelligence_start(
         seen_result;
 
 
-    /*
-     * Intelligence requires the Core publication
-     * service for this revision.
-     */
-
     if (
         host == NULL ||
         host->send_message == NULL ||
@@ -2373,11 +3238,6 @@ rictus_intelligence_start(
             RICTUS_MODULE_ERR_INVALID_STATE;
     }
 
-
-    /*
-     * Store Core host services before the worker
-     * can begin.
-     */
 
     g_intelligence_host =
         host;
@@ -2647,6 +3507,55 @@ rictus_intelligence_start(
     );
 
 
+    if (
+        !g_intelligence_host->register_command(
+            "rag",
+            rictus_intelligence_command_rag,
+            NULL
+        )
+        )
+    {
+        printf(
+            "[INTELLIGENCE] Command registration failed: rag\n"
+        );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "chain",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "approve",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "srt",
+                NULL
+            );
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "show",
+                NULL
+            );
+
+        g_intelligence_host =
+            NULL;
+
+        return
+            RICTUS_MODULE_ERR_START_FAILED;
+    }
+
+
+    printf(
+        "[INTELLIGENCE] Command registered: rag\n"
+    );
+
+
     stop_event =
         CreateEventA(
             NULL,
@@ -2660,6 +3569,12 @@ rictus_intelligence_start(
         stop_event == NULL
         )
     {
+        (void)
+            g_intelligence_host->unregister_command(
+                "rag",
+                NULL
+            );
+
         (void)
             g_intelligence_host->unregister_command(
                 "chain",
@@ -2722,6 +3637,12 @@ rictus_intelligence_start(
         g_intelligence_stop_event =
             NULL;
 
+
+        (void)
+            g_intelligence_host->unregister_command(
+                "rag",
+                NULL
+            );
 
         (void)
             g_intelligence_host->unregister_command(
@@ -2850,14 +3771,26 @@ rictus_intelligence_stop(void)
         NULL;
 
 
-    /*
-     * Worker is gone. Remove module-owned commands
-     * before releasing the Core host reference.
-     */
-
     if (
         g_intelligence_host == NULL ||
         g_intelligence_host->unregister_command == NULL ||
+        !g_intelligence_host->unregister_command(
+            "rag",
+            NULL
+        )
+        )
+    {
+        return
+            RICTUS_MODULE_ERR_STOP_FAILED;
+    }
+
+
+    printf(
+        "[INTELLIGENCE] Command unregistered: rag\n"
+    );
+
+
+    if (
         !g_intelligence_host->unregister_command(
             "chain",
             NULL
@@ -3004,10 +3937,6 @@ rictus_intelligence_qualify(
     while (0)
 
 
-    /*
-     * M01 identity
-     */
-
     RICTUS_TEST(
         strcmp(
             rictus_intelligence_descriptor.id,
@@ -3016,10 +3945,6 @@ rictus_intelligence_qualify(
     );
 
 
-    /*
-     * M02 name
-     */
-
     RICTUS_TEST(
         strcmp(
             rictus_intelligence_descriptor.name,
@@ -3027,10 +3952,6 @@ rictus_intelligence_qualify(
         ) == 0
     );
 
-
-    /*
-     * M03 version
-     */
 
     RICTUS_TEST(
         rictus_intelligence_descriptor.version_major ==
@@ -3042,10 +3963,6 @@ rictus_intelligence_qualify(
     );
 
 
-    /*
-     * M04 API
-     */
-
     RICTUS_TEST(
         rictus_intelligence_descriptor
         .required_core_api_major ==
@@ -3056,10 +3973,6 @@ rictus_intelligence_qualify(
     );
 
 
-    /*
-     * M05 callbacks
-     */
-
     RICTUS_TEST(
         rictus_intelligence_descriptor.qualify ==
         rictus_intelligence_qualify &&
@@ -3069,10 +3982,6 @@ rictus_intelligence_qualify(
         rictus_intelligence_stop
     );
 
-
-    /*
-     * M06 NASA
-     */
 
     RICTUS_TEST(
         rictus_intelligence_source_from_name(
@@ -3086,10 +3995,6 @@ rictus_intelligence_qualify(
     );
 
 
-    /*
-     * M07 SpaceX
-     */
-
     RICTUS_TEST(
         rictus_intelligence_source_from_name(
             "SpaceX"
@@ -3102,10 +4007,6 @@ rictus_intelligence_qualify(
     );
 
 
-    /*
-     * M08 unknown source
-     */
-
     RICTUS_TEST(
         rictus_intelligence_source_from_name(
             "Unknown Source"
@@ -3113,10 +4014,6 @@ rictus_intelligence_qualify(
         RICTUS_INTELLIGENCE_SOURCE_OTHER
     );
 
-
-    /*
-     * M09 invalid source
-     */
 
     RICTUS_TEST(
         rictus_intelligence_source_from_name(
@@ -3129,10 +4026,6 @@ rictus_intelligence_qualify(
         RICTUS_INTELLIGENCE_SOURCE_NONE
     );
 
-
-    /*
-     * M10 negative validation
-     */
 
     ++executed;
 

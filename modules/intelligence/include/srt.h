@@ -26,6 +26,12 @@
 
 #define RICTUS_INTELLIGENCE_SRT_OFFICE_MAX \
     128
+	
+#define RICTUS_INTELLIGENCE_RAG_INPUT_DIRECTORY \
+    "C:\\stn-labz\\rag\\input"
+
+#define RICTUS_INTELLIGENCE_RAG_LINE_MAX \
+    512
 
 
 typedef struct
